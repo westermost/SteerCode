@@ -1,0 +1,5 @@
+.codemap-output/
+__pycache__/
+*.pyc
+.kiro/
+.cursor/
