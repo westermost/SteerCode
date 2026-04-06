@@ -66,6 +66,10 @@ def is_ignored(path: Path, root: Path, gi_patterns: List[str]) -> bool:
         return True
     if path.suffix.lower() in IGNORE_EXTENSIONS:
         return True
+    # Multi-part extensions (.min.js, .min.css, etc.)
+    name_lower = name.lower()
+    if any(name_lower.endswith(ext) for ext in IGNORE_EXTENSIONS):
+        return True
     for pat in gi_patterns:
         if fnmatch.fnmatch(name, pat) or fnmatch.fnmatch(rel, pat):
             return True
