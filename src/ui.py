@@ -4,8 +4,8 @@ from typing import List, Tuple
 class C:
     RST = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"
     GREEN = "\033[32m"; BGREEN = "\033[92m"; YELLOW = "\033[33m"
-    RED = "\033[31m"; WHITE = "\033[97m"; GRAY = "\033[90m"
-    BLACK = "\033[30m"; BG_GREEN = "\033[42m"
+    RED = "\033[31m"; MAGENTA = "\033[35m"; WHITE = "\033[97m"; GRAY = "\033[90m"
+    BLUE = "\033[34m"; BLACK = "\033[30m"; BG_GREEN = "\033[42m"
 
 def _cols() -> int:
     try: return os.get_terminal_size().columns

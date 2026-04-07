@@ -1,38 +1,8 @@
-import ast as python_ast
+"""Regex-based parsers for non-Python languages."""
+
 import re
 from typing import List
-from .types import ParseResult
-
-def parse_python(content: str, path: str) -> ParseResult:
-    r = ParseResult()
-    try:
-        tree = python_ast.parse(content, filename=path)
-    except SyntaxError:
-        return r
-    for node in python_ast.walk(tree):
-        if isinstance(node, (python_ast.FunctionDef, python_ast.AsyncFunctionDef)):
-            params = [a.arg for a in node.args.args if a.arg != "self"]
-            decos = []
-            for d in node.decorator_list:
-                if isinstance(d, python_ast.Name): decos.append(d.id)
-                elif isinstance(d, python_ast.Attribute): decos.append(d.attr)
-            r.functions.append({"name": node.name, "line_start": node.lineno,
-                "line_end": node.end_lineno or node.lineno, "params": params, "decorators": decos})
-        elif isinstance(node, python_ast.ClassDef):
-            methods = [n.name for n in node.body if isinstance(n, (python_ast.FunctionDef, python_ast.AsyncFunctionDef))]
-            bases = []
-            for b in node.bases:
-                if isinstance(b, python_ast.Name): bases.append(b.id)
-                elif isinstance(b, python_ast.Attribute): bases.append(b.attr)
-            decos = [d.id for d in node.decorator_list if isinstance(d, python_ast.Name)]
-            r.classes.append({"name": node.name, "line_start": node.lineno,
-                "line_end": node.end_lineno or node.lineno, "methods": methods, "bases": bases, "decorators": decos})
-        elif isinstance(node, python_ast.Import):
-            for alias in node.names:
-                r.imports.append({"source": alias.name, "specifiers": [alias.asname or alias.name], "line": node.lineno})
-        elif isinstance(node, python_ast.ImportFrom):
-            r.imports.append({"source": node.module or "", "specifiers": [a.name for a in node.names], "line": node.lineno})
-    return r
+from ..types import ParseResult
 
 RE_PATTERNS = {
     "javascript": {
@@ -88,6 +58,7 @@ RE_PATTERNS = {
 }
 RE_PATTERNS["typescript"] = RE_PATTERNS["javascript"]
 
+
 def _find_block_end(lines: List[str], start: int, lang: str) -> int:
     if lang in ("python", "ruby"):
         indent = len(lines[start]) - len(lines[start].lstrip()) if start < len(lines) else 0
@@ -104,6 +75,7 @@ def _find_block_end(lines: List[str], start: int, lang: str) -> int:
                 depth -= 1
                 if found_open and depth == 0: return i + 1
     return min(start + 10, len(lines))
+
 
 def parse_with_regex(content: str, lang: str) -> ParseResult:
     r = ParseResult()
@@ -135,7 +107,3 @@ def parse_with_regex(content: str, lang: str) -> ParseResult:
                 n = n.strip().split(" as ")[0].strip()
                 if n: r.exports.append({"name": n, "line": content[:m.start()].count("\n") + 1})
     return r
-
-def parse_file(content: str, lang: str, path: str) -> ParseResult:
-    if lang == "python": return parse_python(content, path)
-    return parse_with_regex(content, lang)

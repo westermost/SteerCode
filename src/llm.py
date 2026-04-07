@@ -42,17 +42,17 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
     ENRICH_LANGS = {"python","javascript","typescript","java","go","rust","c","cpp",
                     "csharp","ruby","php","swift","kotlin","scala","lua","shell","sql"}
 
-    enrichable = [n for n in nodes if n["type"] in ("function","class")
+    enrichable = [n for n in nodes if n["type"] in ("function","class","file")
                   and n.get("file_path") and n.get("language","") in ENRICH_LANGS]
     if not enrichable: return 0
 
-    skipped_fe = sum(1 for n in nodes if n["type"] in ("function","class")
+    skipped_fe = sum(1 for n in nodes if n["type"] in ("function","class","file")
                      and n.get("language","") in {"css","html","markdown","json","yaml","toml","xml","dockerfile","terraform"})
     if skipped_fe:
         sys.stdout.write(f"\n    {C.DIM}Skipping {skipped_fe} frontend/config nodes{C.RST}\n")
 
     comp_score = {"complex":3, "moderate":2, "simple":1}
-    type_score = {"class":2, "function":1}
+    type_score = {"class":2, "file":1.5, "function":1}
     enrichable.sort(key=lambda n: (comp_score.get(n.get("complexity"),0), type_score.get(n["type"],0)), reverse=True)
 
     if max_enrich > 0 and len(enrichable) > max_enrich:
@@ -62,37 +62,42 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
         sys.stdout.write(f"    {C.DIM}Enriching {len(enrichable)} backend nodes{C.RST}\n")
 
     # Group by file, build batches
-    file_groups: Dict[str, List[dict]] = defaultdict(list)
-    for n in enrichable: file_groups[n["file_path"]].append(n)
+    file_contents: Dict[str, list] = {}
+    for n in enrichable:
+        fp = n["file_path"]
+        if fp not in file_contents:
+            try: file_contents[fp] = (root / fp).read_text(errors="ignore").splitlines()
+            except Exception: file_contents[fp] = None
 
-    batches: List[List[Tuple[str, dict, str]]] = []
+    batches: List[List[Tuple[str, dict, str, str]]] = []  # (fpath, node, snippet, unique_key)
     current_batch, current_chars = [], 0
 
-    for fpath, file_nodes in file_groups.items():
-        try: lines = (root / fpath).read_text(errors="ignore").splitlines()
-        except Exception: continue
-        for n in file_nodes:
-            s, e = max(0, n["line_range"][0]-2), min(len(lines), n["line_range"][1]+1)
-            snippet = "\n".join(lines[s:e])
-            if len(snippet) > max_code_chars: snippet = snippet[:max_code_chars] + "\n..."
-            cost = len(snippet) + 100
-            if current_chars + cost > max_code_chars and current_batch:
-                batches.append(current_batch); current_batch = []; current_chars = 0
-            current_batch.append((fpath, n, snippet)); current_chars += cost
+    for n in enrichable:
+        fpath = n["file_path"]
+        lines = file_contents.get(fpath)
+        if lines is None: continue
+        s, e = max(0, n["line_range"][0]-2), min(len(lines), n["line_range"][1]+1)
+        snippet = "\n".join(lines[s:e])
+        if len(snippet) > max_code_chars: snippet = snippet[:max_code_chars] + "\n..."
+        unique_key = f"{n['type']}:{n['name']}:{Path(fpath).name}"
+        cost = len(snippet) + 100
+        if current_chars + cost > max_code_chars and current_batch:
+            batches.append(current_batch); current_batch = []; current_chars = 0
+        current_batch.append((fpath, n, snippet, unique_key)); current_chars += cost
     if current_batch: batches.append(current_batch)
 
     enriched, consecutive_errors = 0, 0
     for idx, batch in enumerate(batches, 1):
         progress_bar(idx, len(batches), f"Enriching batch {idx}/{len(batches)}")
-        snippets = "".join(f"\n### {n['type']} `{n['name']}` in {fp}\n```\n{s}\n```\n" for fp,n,s in batch)
-        prompt = f'Analyze these code snippets and provide concise summaries.\n{snippets}\nReturn ONLY a JSON object mapping each name to a 1-2 sentence summary.'
+        snippets = "".join(f"\n### `{uk}`\n```\n{s}\n```\n" for _,_,s,uk in batch)
+        prompt = f'Analyze these code snippets and provide concise summaries.\n{snippets}\nReturn ONLY a JSON object where each key is the exact header string (e.g. "type:name:file") mapped to a 1-2 sentence summary.'
 
         try:
             result = _extract_json(_llm_request(llm_url, model, prompt))
             if result:
                 result_lower = {k.lower(): v for k, v in result.items()}
-                for _, n, _ in batch:
-                    for c in [n["name"], f"{n['type']}_{n['name']}", f"{n['type']}{n['name']}"]:
+                for _, n, _, uk in batch:
+                    for c in [uk, n["name"], f"{n['type']}_{n['name']}"]:
                         if c in result: n["summary"] = result[c]; enriched += 1; break
                         elif c.lower() in result_lower: n["summary"] = result_lower[c.lower()]; enriched += 1; break
             consecutive_errors = 0
@@ -102,7 +107,7 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
             except Exception: pass
             if e.code in (401,403): sys.stdout.write(f"\n   ✗ Auth failed ({e.code}). {body}\n"); break
             consecutive_errors += 1
-            batch_chars = sum(len(s) for _,_,s in batch)
+            batch_chars = sum(len(s) for _,_,s,_ in batch)
             sys.stdout.write(f"\n   ⚠ Batch {idx} failed ({e.code}): {body[:150]}\n")
             sys.stdout.write(f"     {C.DIM}~{batch_chars} chars{C.RST}\n")
             if consecutive_errors >= 5: sys.stdout.write(f"   ✗ Too many errors, skipping.\n"); break
