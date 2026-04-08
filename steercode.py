@@ -3,16 +3,23 @@
 
 import json, os, sys, webbrowser
 from pathlib import Path
+
+# Force unbuffered stdout for real-time progress bars on Windows
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(write_through=True)
+elif not getattr(sys.stdout, 'isatty', lambda: False)():
+    sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 from collections import defaultdict
 from datetime import datetime, timezone
 
 from src import (
     scan_files, detect_language, build_graph, detect_layers,
     enrich_with_llm, generate_dashboard, generate_steering,
-    detect_versions,
+    detect_versions, compute_importance,
     C, banner, phase_header, phase_done, table, summary_box, prompt,
     TOOL_NAMES,
 )
+from src.scanner import compute_fingerprints, diff_fingerprints, load_fingerprints, save_fingerprints
 
 # ─── Config Persistence ──────────────────────────────────────────────────────
 
@@ -97,6 +104,7 @@ def _parse_args():
     parser.add_argument("-o", "--output", default=".codemap-output", help="Output directory")
     parser.add_argument("--no-open", action="store_true", help="Don't open dashboard in browser")
     parser.add_argument("--json-only", action="store_true", help="Only output JSON, skip dashboard")
+    parser.add_argument("--full", action="store_true", help="Force full rebuild (ignore fingerprints)")
     parser.add_argument("--llm", default="", help="Local LLM URL (e.g. http://localhost:1234)")
     parser.add_argument("--model", default="", help="Model name (optional)")
     parser.add_argument("--context-size", type=int, default=8192, help="LLM context size in tokens")
@@ -130,7 +138,12 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     # Phase 1: Scan
     phase += 1
     phase_header(phase, total_phases, "Scanning files")
-    files = scan_files(root)
+    def _scan_progress(count, name):
+        if count % 50 == 0 or count < 5:
+            sys.stdout.write(f"\r\033[K    {C.DIM}{count} files found — {name[:50]}{C.RST}")
+            sys.stdout.flush()
+    files = scan_files(root, on_progress=_scan_progress)
+    sys.stdout.write("\r\033[K")  # clear progress line
     if not files:
         print(f"  {C.YELLOW}  ⚠ No supported files found.{C.RST}"); sys.exit(0)
     lang_counts = defaultdict(int)
@@ -138,6 +151,23 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     t1 = time.time()
     phase_done(f"{len(files):,} files across {len(lang_counts)} languages", t1 - t0)
     table([(l, f"{c:,}") for l, c in sorted(lang_counts.items(), key=lambda x: -x[1])[:8]])
+
+    # Fingerprints for incremental
+    fp_path = output_dir / "fingerprints.json"
+    sys.stdout.write(f"    {C.DIM}Computing fingerprints...{C.RST}")
+    sys.stdout.flush()
+    new_fps = compute_fingerprints(root, files)
+    sys.stdout.write(f"\r\033[K")
+    old_fps = load_fingerprints(fp_path) if not getattr(args, "full", False) else None
+    if old_fps:
+        diff = diff_fingerprints(old_fps, new_fps)
+        changed = len(diff["added"]) + len(diff["modified"]) + len(diff["removed"])
+        if changed == 0 and not use_llm:
+            phase_done("No files changed since last run", 0)
+            save_fingerprints(new_fps, fp_path)
+            return
+        sys.stdout.write(f"    {C.DIM}Incremental: {len(diff['added'])} added, {len(diff['modified'])} modified, {len(diff['removed'])} removed{C.RST}\n")
+    save_fingerprints(new_fps, fp_path)
     print()
 
     # Phase 2: Parse
@@ -156,7 +186,8 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
         phase += 1
         phase_header(phase, total_phases, f"Enriching summaries with {C.MAGENTA}local LLM{C.RST} {C.DIM}({llm_url}){C.RST}")
         enriched = enrich_with_llm(result["nodes"], result["edges"], root,
-            llm_url, args.model, getattr(args, "context_size", 8192), getattr(args, "max_enrich", 0))
+            llm_url, args.model, getattr(args, "context_size", 8192), getattr(args, "max_enrich", 0),
+            output_dir=output_dir)
         t_llm = time.time()
         phase_done(f"{enriched:,} nodes enriched", t_llm - t2)
         print(); t2 = t_llm
@@ -216,7 +247,75 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
         webbrowser.open(f"file://{dash_path}")
 
 
+# ─── Query Command ────────────────────────────────────────────────────────────
+
+def _run_query(args):
+    """Handle: steercode query <command> [args]"""
+    from src.query import GraphQuery
+    import json as _json
+
+    graph_path = Path(".codemap-output/knowledge-graph.json")
+    if not graph_path.exists():
+        print(f"{C.RED}  ✗ No knowledge graph found. Run 'python steercode.py .' first.{C.RST}")
+        sys.exit(1)
+
+    q = GraphQuery(str(graph_path))
+
+    if not args:
+        print(f"  {C.WHITE}Usage:{C.RST}")
+        print(f"    steercode query find [--type T] [--domain D] [--effect E] [--name N]")
+        print(f"    steercode query impact <function_name>")
+        print(f"    steercode query flow <from> <to>")
+        print(f"    steercode query explain <function_name>")
+        return
+
+    cmd = args[0]
+
+    if cmd == "find":
+        kwargs = {}
+        i = 1
+        while i < len(args):
+            if args[i] == "--type" and i + 1 < len(args): kwargs["node_type"] = args[i+1]; i += 2
+            elif args[i] == "--domain" and i + 1 < len(args): kwargs["domain"] = args[i+1]; i += 2
+            elif args[i] == "--effect" and i + 1 < len(args): kwargs["effect"] = args[i+1]; i += 2
+            elif args[i] == "--name" and i + 1 < len(args): kwargs["name"] = args[i+1]; i += 2
+            else: i += 1
+        results = q.find(**kwargs)
+        for n in results:
+            eff = f" effects={n.get('effects')}" if n.get("effects") else ""
+            dom = f" domain={n.get('domain')}" if n.get("domain") else ""
+            print(f"  {C.BGREEN}{n['name']}{C.RST} ({n['type']}) in {n.get('file_path','')}{dom}{eff}")
+        print(f"\n  {C.DIM}{len(results)} results{C.RST}")
+
+    elif cmd == "impact" and len(args) > 1:
+        results = q.impact(args[1])
+        for n in results:
+            print(f"  {C.BGREEN}{n['name']}{C.RST} ({n['type']}) in {n.get('file_path','')}")
+        print(f"\n  {C.DIM}{len(results)} impacted nodes{C.RST}")
+
+    elif cmd == "flow" and len(args) > 2:
+        path = q.flow(args[1], args[2])
+        if path:
+            print(f"  {' → '.join(C.BGREEN + n['name'] + C.RST for n in path)}")
+        else:
+            print(f"  {C.YELLOW}No path found{C.RST}")
+
+    elif cmd == "explain" and len(args) > 1:
+        info = q.explain(args[1])
+        if info:
+            print(_json.dumps(info, indent=2))
+        else:
+            print(f"  {C.YELLOW}Node not found: {args[1]}{C.RST}")
+
+    else:
+        print(f"  {C.YELLOW}Unknown query command: {cmd}{C.RST}")
+
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "query":
+        _run_query(sys.argv[2:])
+        return
+
     if len(sys.argv) == 1:
         cfg = interactive_setup()
         class Args: pass

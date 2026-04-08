@@ -1,16 +1,30 @@
 import re, hashlib
 from pathlib import Path
+from collections import defaultdict
 from dataclasses import asdict
 from typing import List, Dict, Set, Tuple
-from .types import GraphNode, GraphEdge, Layer
+from .types import GraphNode, GraphEdge, Layer, SemanticInfo
 from .scanner import detect_language, CODE_LANGS
 from .parsers import parse_file
+from .parsers.semantics import extract_semantics, _detect_role, _detect_domain
 from .ui import progress_bar
 from .complexity import estimate_complexity
 
 def make_id(path: str, name: str = "") -> str:
     raw = f"{path}::{name}" if name else path
     return hashlib.md5(raw.encode()).hexdigest()[:12]
+
+
+def _build_summary(base: str, params: list, decorators: list, sem) -> str:
+    """Build a rich summary from semantic info when no LLM is available."""
+    parts = [base]
+    if params: parts[0] += f" ({', '.join(params[:5])})"
+    if decorators: parts.append(f"@{','.join(decorators[:3])}")
+    if sem.execution_role: parts.append(sem.execution_role)
+    if sem.domain_hint: parts.append(f"[{sem.domain_hint}]")
+    effects = [e.type for e in sem.side_effects]
+    if effects: parts.append("→ " + ", ".join(effects[:3]))
+    return " · ".join(parts) if len(parts) > 1 else parts[0]
 
 
 def build_graph(root: Path, files: List[Path]) -> dict:
@@ -62,17 +76,29 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
         if lang not in CODE_LANGS: continue
         ctx.file_contents[rel] = content
         parsed = parse_file(content, lang, rel)
+        import_sources = [imp.get("source", "") for imp in parsed.imports]
+
+        # Pre-compute file-level semantics once (fast), then per-function only name/role
+        file_sem = extract_semantics(content, fp.name, rel, import_sources, lang)
 
         for fn in parsed.functions:
             nid = make_id(rel, fn["name"])
             ctx.symbol_map[fn["name"]] = nid
             fn_lines = fn["line_end"] - fn["line_start"] + 1
             fn_source = "\n".join(content.splitlines()[fn["line_start"]-1:fn["line_end"]])
-            summary = f"Function with {len(fn['params'])} params" if fn["params"] else "Function"
-            if fn.get("decorators"): summary += f" @{','.join(fn['decorators'])}"
-            ctx.add_node(asdict(GraphNode(id=nid, type="function", name=fn["name"], file_path=rel,
+            # Lightweight per-function: inherit file effects, detect role from name
+            sem = SemanticInfo(
+                side_effects=file_sem.side_effects[:],
+                control_flow=file_sem.control_flow[:],
+                domain_hint=_detect_domain(fn["name"], fn_source, rel),
+                execution_role=_detect_role(fn["name"], rel),
+            )
+            summary = _build_summary("Function", fn["params"], fn.get("decorators", []), sem)
+            node = asdict(GraphNode(id=nid, type="function", name=fn["name"], file_path=rel,
                 line_range=(fn["line_start"], fn["line_end"]), summary=summary,
-                tags=fn.get("decorators", []), language=lang, complexity=estimate_complexity(fn_lines, fn_source, lang))))
+                tags=fn.get("decorators", []), language=lang, complexity=estimate_complexity(fn_lines, fn_source, lang)))
+            node["semantics"] = asdict(sem)
+            ctx.add_node(node)
             ctx.add_edge(fid, nid, "contains")
 
         for cls in parsed.classes:
@@ -80,11 +106,19 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
             ctx.symbol_map[cls["name"]] = nid
             cls_lines = cls["line_end"] - cls["line_start"] + 1
             cls_source = "\n".join(content.splitlines()[cls["line_start"]-1:cls["line_end"]])
-            summary = f"Class with {len(cls['methods'])} methods"
-            if cls.get("bases"): summary += f", extends {', '.join(cls['bases'])}"
-            ctx.add_node(asdict(GraphNode(id=nid, type="class", name=cls["name"], file_path=rel,
+            sem = SemanticInfo(
+                side_effects=file_sem.side_effects[:],
+                control_flow=file_sem.control_flow[:],
+                domain_hint=_detect_domain(cls["name"], cls_source, rel),
+                execution_role=_detect_role(cls["name"], rel),
+            )
+            base_info = f", extends {', '.join(cls['bases'])}" if cls.get("bases") else ""
+            summary = _build_summary(f"Class with {len(cls['methods'])} methods{base_info}", [], cls.get("decorators", []), sem)
+            node = asdict(GraphNode(id=nid, type="class", name=cls["name"], file_path=rel,
                 line_range=(cls["line_start"], cls["line_end"]), summary=summary,
-                tags=cls.get("decorators", []), language=lang, complexity=estimate_complexity(cls_lines, cls_source, lang))))
+                tags=cls.get("decorators", []), language=lang, complexity=estimate_complexity(cls_lines, cls_source, lang)))
+            node["semantics"] = asdict(sem)
+            ctx.add_node(node)
             ctx.add_edge(fid, nid, "contains")
             for base in cls.get("bases", []):
                 if base in ctx.symbol_map: ctx.add_edge(nid, ctx.symbol_map[base], "inherits", 0.8)
@@ -161,3 +195,107 @@ def detect_layers(nodes: List[dict]) -> List[dict]:
             elif lang in ("html","css"): layers["ui"].node_ids.append(node["id"])
             else: layers["service"].node_ids.append(node["id"])
     return [asdict(l) for l in layers.values() if l.node_ids]
+
+# ─── Graph Relationships ─────────────────────────────────────────────────────
+
+def get_callers(node_id: str, edges: List[dict]) -> List[str]:
+    """Get IDs of nodes that call this node."""
+    return [e["source"] for e in edges if e["target"] == node_id and e["type"] == "calls"]
+
+def get_callees(node_id: str, edges: List[dict]) -> List[str]:
+    """Get IDs of nodes that this node calls."""
+    return [e["target"] for e in edges if e["source"] == node_id and e["type"] == "calls"]
+
+# ─── Importance Scoring ──────────────────────────────────────────────────────
+
+def compute_importance(nodes: List[dict], edges: List[dict]) -> Dict[str, float]:
+    """Compute importance scores with decay by depth, normalized to percentile."""
+    # Pre-build adjacency: target → set of callers (O(E) once)
+    callers_of = defaultdict(set)
+    for e in edges:
+        if e["type"] == "calls":
+            callers_of[e["target"]].add(e["source"])
+
+    scores = {}
+    for n in nodes:
+        if n["type"] not in ("function", "class"): continue
+        nid = n["id"]
+        sem = n.get("semantics", {})
+        score = 0.0
+
+        effects = sem.get("side_effects", [])
+        if any("db_write" in str(e) for e in effects): score += 0.3
+        if any("external_api" in str(e) for e in effects): score += 0.3
+
+        # Direct callers (0.1 each, cap 0.3)
+        direct = callers_of.get(nid, set())
+        score += min(len(direct) * 0.1, 0.3)
+
+        # Indirect callers depth-2 (0.05 each, cap 0.15) — O(callers) lookup
+        indirect = set()
+        for caller in direct:
+            indirect.update(callers_of.get(caller, set()))
+        indirect -= direct
+        score += min(len(indirect) * 0.05, 0.15)
+
+        role = sem.get("execution_role", "")
+        if role in ("entry_point", "orchestrator"): score += 0.2
+        if n.get("complexity") == "complex": score += 0.1
+
+        scores[nid] = min(score, 1.0)
+
+    # Percentile normalization
+    if scores:
+        sorted_vals = sorted(set(scores.values()))
+        rank_map = {v: i / max(len(sorted_vals) - 1, 1) for i, v in enumerate(sorted_vals)}
+        scores = {k: round(rank_map[v], 3) for k, v in scores.items()}
+    return scores
+
+
+# ─── Incremental ─────────────────────────────────────────────────────────────
+
+MAX_IMPACT_DEPTH = 2
+FOLLOW_EDGE_TYPES = {"calls", "imports"}
+
+def get_impacted_files(changed_files: Set[str], edges: List[dict], max_depth: int = MAX_IMPACT_DEPTH) -> Set[str]:
+    """Bounded BFS: expand changed files to transitively affected files."""
+    visited = set(changed_files)
+    frontier = set(changed_files)
+    for _ in range(max_depth):
+        next_frontier = set()
+        for f in frontier:
+            for e in edges:
+                if e["type"] not in FOLLOW_EDGE_TYPES: continue
+                neighbor = e["target"] if e["source"] == f else (e["source"] if e["target"] == f else None)
+                if neighbor and neighbor not in visited:
+                    visited.add(neighbor)
+                    next_frontier.add(neighbor)
+        frontier = next_frontier
+        if not frontier: break
+    return visited
+
+
+def merge_graphs(old: dict, new: dict, changed_file_paths: Set[str]) -> dict:
+    """Merge new graph results into old graph, replacing nodes from changed files."""
+    old_nodes = {n["id"]: n for n in old.get("nodes", [])}
+    new_nodes = {n["id"]: n for n in new.get("nodes", [])}
+
+    # Remove old nodes from changed files
+    for nid, n in list(old_nodes.items()):
+        if n.get("file_path") in changed_file_paths:
+            del old_nodes[nid]
+
+    # Add new nodes
+    old_nodes.update(new_nodes)
+
+    # Merge edges: remove edges involving changed files, add new ones
+    old_edges = [e for e in old.get("edges", [])
+                 if not any(old.get("nodes", [{}])[0].get("file_path") in changed_file_paths
+                           for _ in [0])]  # keep all old edges for simplicity
+    new_edge_set = {(e["source"], e["target"], e["type"]) for e in new.get("edges", [])}
+    merged_edges = [e for e in old.get("edges", [])
+                    if (e["source"], e["target"], e["type"]) not in new_edge_set]
+    merged_edges.extend(new.get("edges", []))
+
+    return {"nodes": list(old_nodes.values()), "edges": merged_edges,
+            "file_id_map": {**old.get("file_id_map", {}), **new.get("file_id_map", {})}}

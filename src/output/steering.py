@@ -86,6 +86,9 @@ def _build_steering_content(graph_data: dict) -> str:
         ))[:30]
     top_ref = "\n".join(
         f"- `{n['name']}` ({n['type']}, {n.get('complexity','')}) in `{n.get('file_path','')}`"
+        + (f" — domain: {n['semantics']['domain_hint']}" if n.get('semantics', {}).get('domain_hint') else "")
+        + (f", role: {n['semantics']['execution_role']}" if n.get('semantics', {}).get('execution_role') else "")
+        + (f", effects: {', '.join(e['type'] for e in n['semantics'].get('side_effects', []))}" if n.get('semantics', {}).get('side_effects') else "")
         for n in top_nodes)
 
     return f"""# Codebase Knowledge Graph

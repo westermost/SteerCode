@@ -1,6 +1,6 @@
-import fnmatch
+import fnmatch, hashlib, json
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Optional
 
 DEFAULT_IGNORE = {
     "node_modules", ".git", "__pycache__", ".venv", "venv", "env",
@@ -86,7 +86,7 @@ def detect_language(path: Path) -> str:
             return lang
     return LANG_MAP.get(path.suffix.lower(), "")
 
-def scan_files(root: Path) -> List[Path]:
+def scan_files(root: Path, on_progress=None) -> List[Path]:
     gi_patterns = parse_gitignore(root)
     files = []
     def walk(d: Path):
@@ -102,5 +102,43 @@ def scan_files(root: Path) -> List[Path]:
             elif e.is_file() and e.stat().st_size <= MAX_FILE_SIZE:
                 if detect_language(e):
                     files.append(e)
+                    if on_progress:
+                        on_progress(len(files), e.name)
     walk(root)
     return files
+
+
+# ─── Fingerprints (Incremental) ──────────────────────────────────────────────
+
+def compute_fingerprints(root: Path, files: List[Path]) -> Dict[str, str]:
+    """Fast fingerprint: size + mtime (no file read needed)."""
+    fps = {}
+    for f in files:
+        try:
+            st = f.stat()
+            fps[str(f.relative_to(root)).replace("\\", "/")] = f"{st.st_size}:{int(st.st_mtime)}"
+        except Exception:
+            pass
+    return fps
+
+
+def diff_fingerprints(old: Dict[str, str], new: Dict[str, str]) -> Dict[str, List[str]]:
+    """Compare fingerprints. Returns {added, modified, removed}."""
+    old_keys, new_keys = set(old), set(new)
+    return {
+        "added": sorted(new_keys - old_keys),
+        "modified": sorted(k for k in old_keys & new_keys if old[k] != new[k]),
+        "removed": sorted(old_keys - new_keys),
+    }
+
+
+def load_fingerprints(path: Path) -> Optional[Dict[str, str]]:
+    if path.exists():
+        try: return json.loads(path.read_text())
+        except Exception: pass
+    return None
+
+
+def save_fingerprints(fps: Dict[str, str], path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(fps, indent=2))
