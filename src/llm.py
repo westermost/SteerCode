@@ -67,9 +67,20 @@ def classify_error(e: Exception) -> str:
 
 # ─── Batch Cache (Idempotency) ───────────────────────────────────────────────
 
-def _batch_id(items: list) -> str:
-    content = json.dumps([(n["id"], n["name"]) for n in items], sort_keys=True)
-    return hashlib.md5(content.encode()).hexdigest()[:12]
+def _batch_id(items: list, file_contents: Dict[str, list] = None) -> str:
+    """Cache key from node identity + content fingerprint."""
+    parts = []
+    for n in items:
+        fp = n.get("file_path", "")
+        lr = n.get("line_range", [0, 0])
+        # Include content hash so code changes invalidate cache
+        content_sig = ""
+        if file_contents and fp in file_contents and file_contents[fp]:
+            lines = file_contents[fp]
+            s, e = max(0, lr[0] - 1), min(len(lines), lr[1])
+            content_sig = hashlib.md5("\n".join(lines[s:e]).encode()).hexdigest()[:8]
+        parts.append((n["id"], content_sig))
+    return hashlib.md5(json.dumps(parts, sort_keys=True).encode()).hexdigest()[:12]
 
 def _get_cached(cache_dir: Optional[Path], bid: str) -> Optional[dict]:
     if not cache_dir: return None
@@ -148,12 +159,13 @@ def _build_func_block(node: dict, snippet: str, idx: int) -> str:
 def _build_batch_prompt(batch_nodes: List[dict], file_contents: Dict[str, list],
                         max_code_chars: int, edges: List[dict] = None,
                         node_by_id: Dict[str, dict] = None,
-                        importance: Dict[str, float] = None) -> Tuple[str, List[str], Dict[str, str]]:
-    """Build structured prompt for a batch. Returns (prompt, expected_ids, id_to_node_id)."""
+                        importance: Dict[str, float] = None) -> Tuple[str, List[str], Dict[str, str], List[dict]]:
+    """Build structured prompt for a batch. Returns (prompt, expected_ids, id_to_node_id, overflow_nodes)."""
     blocks = []
     expected_ids = []
     id_map = {}  # fN → node["id"]
     total_chars = 0
+    overflow = []
 
     for i, n in enumerate(batch_nodes):
         lines = file_contents.get(n["file_path"])
@@ -161,12 +173,13 @@ def _build_batch_prompt(batch_nodes: List[dict], file_contents: Dict[str, list],
         s, e = max(0, n["line_range"][0] - 2), min(len(lines), n["line_range"][1] + 1)
         snippet = "\n".join(lines[s:e])
         if len(snippet) > 3000: snippet = snippet[:3000] + "\n..."
-        if total_chars + len(snippet) > max_code_chars and blocks: break
+        if total_chars + len(snippet) > max_code_chars and blocks:
+            overflow.append(n)
+            continue
         total_chars += len(snippet)
 
         fid = f"f{i}"
         block = _build_func_block(n, snippet, i)
-        # Inject context if available
         if edges and node_by_id and importance:
             ctx = _select_context(n, edges, node_by_id, importance)
             if ctx: block = block.replace("</FUNC>", f"{ctx}\n</FUNC>")
@@ -179,7 +192,7 @@ def _build_batch_prompt(batch_nodes: List[dict], file_contents: Dict[str, list],
         + "\n\n".join(blocks)
         + f'\n\nReturn ONLY: {{"f0": "summary...", "f1": "summary...", ...}}'
     )
-    return prompt, expected_ids, id_map
+    return prompt, expected_ids, id_map, overflow
 
 # ─── Validation + Retry ─────────────────────────────────────────────────────
 
@@ -280,13 +293,13 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
 
     def _process_one(idx_batch):
         idx, batch = idx_batch
-        bid = _batch_id(batch)
+        bid = _batch_id(batch, file_contents)
         cached = _get_cached(cache_dir, bid)
         if cached:
-            return idx, bid, cached, None, "cached", 0
+            return idx, bid, cached, None, "cached", 0, []
 
         t0 = time.time()
-        prompt, expected_ids, id_map = _build_batch_prompt(batch, file_contents, max_code_chars,
+        prompt, expected_ids, id_map, overflow = _build_batch_prompt(batch, file_contents, max_code_chars,
                                                             edges, node_by_id, importance)
         raw = _llm_request(llm_url, model, prompt)
         result = _extract_json(raw)
@@ -303,9 +316,11 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
 
         missing = set(expected_ids) - set(result.keys()) if result else set(expected_ids)
         status = "success" if not missing else "partial"
-        return idx, bid, cache_result, missing, status, latency
+        return idx, bid, cache_result, missing, status, latency, overflow
 
     max_workers = min(3, max(1, len(batches) // 2))
+
+    overflow_nodes = []
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_process_one, (i, b)): i for i, b in enumerate(batches)}
@@ -313,12 +328,14 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
         for future in as_completed(futures):
             done_count = sum(1 for f in futures if f.done())
             try:
-                idx, bid, result_map, missing, status, latency = future.result(timeout=600)
+                idx, bid, result_map, missing, status, latency, overflow = future.result(timeout=600)
                 with lock:
                     for nid, summary in result_map.items():
                         if nid in node_by_id:
                             node_by_id[nid]["summary"] = summary
                             enriched += 1
+                    if overflow:
+                        overflow_nodes.extend(overflow)
                     eta.tick()
                     progress_bar_eta(done_count, len(batches), eta, f"batch {done_count}/{len(batches)}")
                     metrics.append({"batch_id": bid, "status": status, "size": len(batches[idx]),
@@ -342,6 +359,24 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
                     if consecutive_errors >= 5:
                         stop_flag.set()
                         break
+
+    # Requeue overflow nodes (exceeded prompt budget)
+    if overflow_nodes and not stop_flag.is_set():
+        sys.stdout.write(f"\n    {C.DIM}Requeueing {len(overflow_nodes)} overflow nodes...{C.RST}\n")
+        for n in overflow_nodes:
+            prompt, eids, imap, _ = _build_batch_prompt([n], file_contents, max_code_chars)
+            if not eids: continue
+            try:
+                raw = _llm_request(llm_url, model, prompt)
+                result = _extract_json(raw)
+                if result:
+                    for fid, summary in result.items():
+                        nid = imap.get(fid)
+                        if nid and nid in node_by_id and isinstance(summary, str):
+                            node_by_id[nid]["summary"] = summary
+                            enriched += 1
+            except Exception:
+                pass
 
     del file_contents
 
