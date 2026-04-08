@@ -210,17 +210,11 @@ def get_callees(node_id: str, edges: List[dict]) -> List[str]:
 
 def compute_importance(nodes: List[dict], edges: List[dict]) -> Dict[str, float]:
     """Compute importance scores with decay by depth, normalized to percentile."""
-    direct_callers = defaultdict(set)
+    # Pre-build adjacency: target → set of callers (O(E) once)
+    callers_of = defaultdict(set)
     for e in edges:
-        if e["type"] == "calls": direct_callers[e["target"]].add(e["source"])
-
-    # Indirect callers (depth 2)
-    indirect_callers = defaultdict(set)
-    for target, callers in direct_callers.items():
-        for caller in callers:
-            for e in edges:
-                if e["type"] == "calls" and e["target"] == caller:
-                    indirect_callers[target].add(e["source"])
+        if e["type"] == "calls":
+            callers_of[e["target"]].add(e["source"])
 
     scores = {}
     for n in nodes:
@@ -233,8 +227,16 @@ def compute_importance(nodes: List[dict], edges: List[dict]) -> Dict[str, float]
         if any("db_write" in str(e) for e in effects): score += 0.3
         if any("external_api" in str(e) for e in effects): score += 0.3
 
-        score += min(len(direct_callers.get(nid, set())) * 0.1, 0.3)
-        score += min(len(indirect_callers.get(nid, set())) * 0.05, 0.15)
+        # Direct callers (0.1 each, cap 0.3)
+        direct = callers_of.get(nid, set())
+        score += min(len(direct) * 0.1, 0.3)
+
+        # Indirect callers depth-2 (0.05 each, cap 0.15) — O(callers) lookup
+        indirect = set()
+        for caller in direct:
+            indirect.update(callers_of.get(caller, set()))
+        indirect -= direct
+        score += min(len(indirect) * 0.05, 0.15)
 
         role = sem.get("execution_role", "")
         if role in ("entry_point", "orchestrator"): score += 0.2
