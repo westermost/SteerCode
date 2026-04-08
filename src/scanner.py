@@ -86,7 +86,7 @@ def detect_language(path: Path) -> str:
             return lang
     return LANG_MAP.get(path.suffix.lower(), "")
 
-def scan_files(root: Path) -> List[Path]:
+def scan_files(root: Path, on_progress=None) -> List[Path]:
     gi_patterns = parse_gitignore(root)
     files = []
     def walk(d: Path):
@@ -102,6 +102,8 @@ def scan_files(root: Path) -> List[Path]:
             elif e.is_file() and e.stat().st_size <= MAX_FILE_SIZE:
                 if detect_language(e):
                     files.append(e)
+                    if on_progress:
+                        on_progress(len(files), e.name)
     walk(root)
     return files
 

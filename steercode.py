@@ -138,7 +138,11 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     # Phase 1: Scan
     phase += 1
     phase_header(phase, total_phases, "Scanning files")
-    files = scan_files(root)
+    def _scan_progress(count, name):
+        sys.stdout.write(f"\r\033[K    {C.DIM}{count} files found — {name[:50]}{C.RST}")
+        sys.stdout.flush()
+    files = scan_files(root, on_progress=_scan_progress)
+    sys.stdout.write("\r\033[K")  # clear progress line
     if not files:
         print(f"  {C.YELLOW}  ⚠ No supported files found.{C.RST}"); sys.exit(0)
     lang_counts = defaultdict(int)
