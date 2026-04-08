@@ -230,12 +230,15 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
     sys.stdout.write(f"    {C.DIM}Enriching {len(enrichable)} backend nodes{C.RST}\n")
 
     # Read file contents once
+    sys.stdout.write(f"    {C.DIM}Reading file contents...{C.RST}")
+    sys.stdout.flush()
     file_contents: Dict[str, list] = {}
     for n in enrichable:
         fp = n["file_path"]
         if fp not in file_contents:
             try: file_contents[fp] = (root / fp).read_text(errors="ignore").splitlines()
             except Exception: file_contents[fp] = None
+    sys.stdout.write(f"\r\033[K    {C.DIM}{len(file_contents)} files loaded{C.RST}\n")
 
     # Batch by file (10-20 files per batch)
     by_file = defaultdict(list)
@@ -257,8 +260,11 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
     node_by_id = {n["id"]: n for n in nodes}
 
     # Compute importance for context selection
+    sys.stdout.write(f"    {C.DIM}Computing importance scores...{C.RST}")
+    sys.stdout.flush()
     from .graph import compute_importance
     importance = compute_importance(nodes, edges)
+    sys.stdout.write(f"\r\033[K    {C.DIM}{len(importance)} nodes scored, {len(batches)} batches ready{C.RST}\n")
     for nid, score in importance.items():
         if nid in node_by_id:
             sem = node_by_id[nid].get("semantics")
