@@ -4,8 +4,8 @@ from .. import register_rules
 
 register_rules(branches={
     "python":     r'^\s*(?:if |elif |else:|for |while |except |with |try:|finally:|match |case )',
-    "javascript": r'(?:(?:if|else if|else|for|while|do|switch|case|catch|finally)\s*[\({]|=>|\?\?|[?:](?!=)|\.\?\.)',
-    "typescript": r'(?:(?:if|else if|else|for|while|do|switch|case|catch|finally)\s*[\({]|=>|\?\?|[?:](?!=)|\.\?\.|(?:as|is|satisfies)\s)',
+    "javascript": r'(?:(?:if|else if|else|for|while|do|switch|case|catch|finally)\s*[\({]|=>|\?\?|\?\.|[^\s?]\s*\?\s*[^\s?.:>])',
+    "typescript": r'(?:(?:if|else if|else|for|while|do|switch|case|catch|finally)\s*[\({]|=>|\?\?|\?\.|[^\s?]\s*\?\s*[^\s?.:>]|(?:as|is|satisfies)\s)',
     "java":       r'(?:(?:if|else if|else|for|while|do|switch|case|catch|finally|throw)\s*[\({]|instanceof|\?)',
     "kotlin":     r'(?:(?:if|else if|else|for|while|do|when|catch|finally|throw)\s*[\({]|\?[.:]|!!|is\s)',
     "swift":      r'(?:(?:if|else if|else|for|while|repeat|switch|case|catch|guard|throw)\s*[\({]|\?\.|try[?!])',
