@@ -4,5 +4,5 @@ __pycache__/
 .kiro/
 .cursor/
 .agents/*
-docs/optimization-plan.md
+docs/*
 skills-lock.json
