@@ -139,8 +139,9 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     phase += 1
     phase_header(phase, total_phases, "Scanning files")
     def _scan_progress(count, name):
-        sys.stdout.write(f"\r\033[K    {C.DIM}{count} files found — {name[:50]}{C.RST}")
-        sys.stdout.flush()
+        if count % 50 == 0 or count < 5:
+            sys.stdout.write(f"\r\033[K    {C.DIM}{count} files found — {name[:50]}{C.RST}")
+            sys.stdout.flush()
     files = scan_files(root, on_progress=_scan_progress)
     sys.stdout.write("\r\033[K")  # clear progress line
     if not files:
