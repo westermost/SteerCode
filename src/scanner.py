@@ -1,6 +1,6 @@
-import fnmatch
+import fnmatch, hashlib, json
 from pathlib import Path
-from typing import List
+from typing import List, Dict, Optional
 
 DEFAULT_IGNORE = {
     "node_modules", ".git", "__pycache__", ".venv", "venv", "env",
@@ -104,3 +104,38 @@ def scan_files(root: Path) -> List[Path]:
                     files.append(e)
     walk(root)
     return files
+
+
+# ─── Fingerprints (Incremental) ──────────────────────────────────────────────
+
+def compute_fingerprints(root: Path, files: List[Path]) -> Dict[str, str]:
+    """MD5 hash per file content."""
+    fps = {}
+    for f in files:
+        try:
+            fps[str(f.relative_to(root)).replace("\\", "/")] = hashlib.md5(f.read_bytes()).hexdigest()
+        except Exception:
+            pass
+    return fps
+
+
+def diff_fingerprints(old: Dict[str, str], new: Dict[str, str]) -> Dict[str, List[str]]:
+    """Compare fingerprints. Returns {added, modified, removed}."""
+    old_keys, new_keys = set(old), set(new)
+    return {
+        "added": sorted(new_keys - old_keys),
+        "modified": sorted(k for k in old_keys & new_keys if old[k] != new[k]),
+        "removed": sorted(old_keys - new_keys),
+    }
+
+
+def load_fingerprints(path: Path) -> Optional[Dict[str, str]]:
+    if path.exists():
+        try: return json.loads(path.read_text())
+        except Exception: pass
+    return None
+
+
+def save_fingerprints(fps: Dict[str, str], path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(fps, indent=2))

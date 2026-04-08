@@ -222,3 +222,52 @@ def compute_importance(nodes: List[dict], edges: List[dict]) -> Dict[str, float]
         rank_map = {v: i / max(len(sorted_vals) - 1, 1) for i, v in enumerate(sorted_vals)}
         scores = {k: round(rank_map[v], 3) for k, v in scores.items()}
     return scores
+
+
+# ─── Incremental ─────────────────────────────────────────────────────────────
+
+MAX_IMPACT_DEPTH = 2
+FOLLOW_EDGE_TYPES = {"calls", "imports"}
+
+def get_impacted_files(changed_files: Set[str], edges: List[dict], max_depth: int = MAX_IMPACT_DEPTH) -> Set[str]:
+    """Bounded BFS: expand changed files to transitively affected files."""
+    visited = set(changed_files)
+    frontier = set(changed_files)
+    for _ in range(max_depth):
+        next_frontier = set()
+        for f in frontier:
+            for e in edges:
+                if e["type"] not in FOLLOW_EDGE_TYPES: continue
+                neighbor = e["target"] if e["source"] == f else (e["source"] if e["target"] == f else None)
+                if neighbor and neighbor not in visited:
+                    visited.add(neighbor)
+                    next_frontier.add(neighbor)
+        frontier = next_frontier
+        if not frontier: break
+    return visited
+
+
+def merge_graphs(old: dict, new: dict, changed_file_paths: Set[str]) -> dict:
+    """Merge new graph results into old graph, replacing nodes from changed files."""
+    old_nodes = {n["id"]: n for n in old.get("nodes", [])}
+    new_nodes = {n["id"]: n for n in new.get("nodes", [])}
+
+    # Remove old nodes from changed files
+    for nid, n in list(old_nodes.items()):
+        if n.get("file_path") in changed_file_paths:
+            del old_nodes[nid]
+
+    # Add new nodes
+    old_nodes.update(new_nodes)
+
+    # Merge edges: remove edges involving changed files, add new ones
+    old_edges = [e for e in old.get("edges", [])
+                 if not any(old.get("nodes", [{}])[0].get("file_path") in changed_file_paths
+                           for _ in [0])]  # keep all old edges for simplicity
+    new_edge_set = {(e["source"], e["target"], e["type"]) for e in new.get("edges", [])}
+    merged_edges = [e for e in old.get("edges", [])
+                    if (e["source"], e["target"], e["type"]) not in new_edge_set]
+    merged_edges.extend(new.get("edges", []))
+
+    return {"nodes": list(old_nodes.values()), "edges": merged_edges,
+            "file_id_map": {**old.get("file_id_map", {}), **new.get("file_id_map", {})}}

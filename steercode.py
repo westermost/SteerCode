@@ -9,10 +9,11 @@ from datetime import datetime, timezone
 from src import (
     scan_files, detect_language, build_graph, detect_layers,
     enrich_with_llm, generate_dashboard, generate_steering,
-    detect_versions,
+    detect_versions, compute_importance,
     C, banner, phase_header, phase_done, table, summary_box, prompt,
     TOOL_NAMES,
 )
+from src.scanner import compute_fingerprints, diff_fingerprints, load_fingerprints, save_fingerprints
 
 # ─── Config Persistence ──────────────────────────────────────────────────────
 
@@ -97,6 +98,7 @@ def _parse_args():
     parser.add_argument("-o", "--output", default=".codemap-output", help="Output directory")
     parser.add_argument("--no-open", action="store_true", help="Don't open dashboard in browser")
     parser.add_argument("--json-only", action="store_true", help="Only output JSON, skip dashboard")
+    parser.add_argument("--full", action="store_true", help="Force full rebuild (ignore fingerprints)")
     parser.add_argument("--llm", default="", help="Local LLM URL (e.g. http://localhost:1234)")
     parser.add_argument("--model", default="", help="Model name (optional)")
     parser.add_argument("--context-size", type=int, default=8192, help="LLM context size in tokens")
@@ -138,6 +140,20 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     t1 = time.time()
     phase_done(f"{len(files):,} files across {len(lang_counts)} languages", t1 - t0)
     table([(l, f"{c:,}") for l, c in sorted(lang_counts.items(), key=lambda x: -x[1])[:8]])
+
+    # Fingerprints for incremental
+    fp_path = output_dir / "fingerprints.json"
+    new_fps = compute_fingerprints(root, files)
+    old_fps = load_fingerprints(fp_path) if not getattr(args, "full", False) else None
+    if old_fps:
+        diff = diff_fingerprints(old_fps, new_fps)
+        changed = len(diff["added"]) + len(diff["modified"]) + len(diff["removed"])
+        if changed == 0:
+            phase_done("No files changed since last run", 0)
+            save_fingerprints(new_fps, fp_path)
+            return
+        sys.stdout.write(f"    {C.DIM}Incremental: {len(diff['added'])} added, {len(diff['modified'])} modified, {len(diff['removed'])} removed{C.RST}\n")
+    save_fingerprints(new_fps, fp_path)
     print()
 
     # Phase 2: Parse

@@ -20,6 +20,8 @@ def _strip_defaults(graph_data: dict) -> dict:
             if sem.get("execution_role"): node["role"] = sem["execution_role"]
             if sem.get("side_effects"):
                 node["effects"] = [e["type"] for e in sem["side_effects"]]
+            if sem.get("control_flow"):
+                node["control_flow"] = sem["control_flow"]
             if sem.get("importance"): node["importance"] = sem["importance"]
         stripped["nodes"].append(node)
     stripped["edges"] = []

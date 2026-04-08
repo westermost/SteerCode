@@ -1,6 +1,7 @@
 """LLM enrichment — structured batch, validation, context-aware prompts."""
 
-import sys, json, re, time, hashlib, urllib.request, urllib.error
+import sys, json, re, time, hashlib, threading, urllib.request, urllib.error
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional
@@ -263,71 +264,78 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
             sem = node_by_id[nid].get("semantics")
             if sem: sem["importance"] = score
 
-    # Process batches
+    # Process batches (concurrent)
     enriched = 0
     consecutive_errors = 0
     eta = ETATracker(len(batches))
-    metrics = []  # for observability
+    metrics = []
+    lock = threading.Lock()
+    stop_flag = threading.Event()
 
-    for idx, batch in enumerate(batches, 1):
-        progress_bar_eta(idx, len(batches), eta, f"batch {idx}/{len(batches)}")
+    def _process_one(idx_batch):
+        idx, batch = idx_batch
         bid = _batch_id(batch)
-
-        # Check cache
         cached = _get_cached(cache_dir, bid)
         if cached:
-            for node_id, summary in cached.items():
-                if node_id in node_by_id: node_by_id[node_id]["summary"] = summary; enriched += 1
-            eta.tick()
-            metrics.append({"batch_id": bid, "status": "cached", "size": len(batch)})
-            continue
+            return idx, bid, cached, None, "cached", 0
 
         t0 = time.time()
         prompt, expected_ids, id_map = _build_batch_prompt(batch, file_contents, max_code_chars,
                                                             edges, node_by_id, importance)
+        raw = _llm_request(llm_url, model, prompt)
+        result = _extract_json(raw)
+        result = _validate_and_retry(result, expected_ids, llm_url, model, prompt)
+        latency = time.time() - t0
 
-        try:
-            raw = _llm_request(llm_url, model, prompt)
-            result = _extract_json(raw)
-            result = _validate_and_retry(result, expected_ids, llm_url, model, prompt)
-            latency = time.time() - t0
-            eta.tick()
+        cache_result = {}
+        if result:
+            for fid, summary in result.items():
+                nid = id_map.get(fid)
+                if nid and isinstance(summary, str):
+                    cache_result[nid] = summary
+            _save_cache(cache_dir, bid, cache_result)
 
-            if result:
-                cache_result = {}
-                for fid, summary in result.items():
-                    node_id = id_map.get(fid)
-                    if node_id and node_id in node_by_id and isinstance(summary, str):
-                        node_by_id[node_id]["summary"] = summary
-                        cache_result[node_id] = summary
-                        enriched += 1
-                _save_cache(cache_dir, bid, cache_result)
+        missing = set(expected_ids) - set(result.keys()) if result else set(expected_ids)
+        status = "success" if not missing else "partial"
+        return idx, bid, cache_result, missing, status, latency
 
-            missing = set(expected_ids) - set(result.keys()) if result else set(expected_ids)
-            metrics.append({"batch_id": bid, "status": "success" if not missing else "partial",
-                           "size": len(batch), "latency": round(latency, 1),
-                           "missing_ids": list(missing), "tokens_est": len(prompt) // 4})
-            consecutive_errors = 0
+    max_workers = min(3, max(1, len(batches) // 2))
 
-        except urllib.error.HTTPError as e:
-            body = ""
-            try: body = e.read().decode(errors="ignore")[:300]
-            except Exception: pass
-            err_type = classify_error(e)
-            if err_type == "auth":
-                sys.stdout.write(f"\n   ✗ Auth failed ({e.code}). {body}\n"); break
-            consecutive_errors += 1
-            metrics.append({"batch_id": bid, "status": "failed", "error": err_type, "size": len(batch)})
-            sys.stdout.write(f"\n   ⚠ Batch {idx} failed ({e.code}): {body[:150]}\n")
-            if consecutive_errors >= 5:
-                sys.stdout.write(f"   ✗ Too many errors, stopping.\n"); break
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {pool.submit(_process_one, (i, b)): i for i, b in enumerate(batches)}
 
-        except Exception as e:
-            err_type = classify_error(e)
-            consecutive_errors += 1
-            metrics.append({"batch_id": bid, "status": "failed", "error": err_type, "size": len(batch)})
-            sys.stdout.write(f"\n   ⚠ Batch {idx}: {e}\n")
-            if consecutive_errors >= 5: break
+        for future in as_completed(futures):
+            done_count = sum(1 for f in futures if f.done())
+            try:
+                idx, bid, result_map, missing, status, latency = future.result(timeout=600)
+                with lock:
+                    for nid, summary in result_map.items():
+                        if nid in node_by_id:
+                            node_by_id[nid]["summary"] = summary
+                            enriched += 1
+                    eta.tick()
+                    progress_bar_eta(done_count, len(batches), eta, f"batch {done_count}/{len(batches)}")
+                    metrics.append({"batch_id": bid, "status": status, "size": len(batches[idx]),
+                                   "latency": round(latency, 1)})
+                    consecutive_errors = 0
+
+            except urllib.error.HTTPError as e:
+                err_type = classify_error(e)
+                with lock:
+                    consecutive_errors += 1
+                    metrics.append({"batch_id": "", "status": "failed", "error": err_type})
+                    progress_bar_eta(done_count, len(batches), eta, f"⚠ error")
+                    if err_type == "auth" or consecutive_errors >= 5:
+                        stop_flag.set()
+                        break
+
+            except Exception as e:
+                with lock:
+                    consecutive_errors += 1
+                    metrics.append({"batch_id": "", "status": "failed", "error": str(e)[:100]})
+                    if consecutive_errors >= 5:
+                        stop_flag.set()
+                        break
 
     del file_contents
 
