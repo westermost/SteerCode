@@ -2,13 +2,10 @@ import sys, json, re, time, urllib.request, urllib.error
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional
-from concurrent.futures import ThreadPoolExecutor, as_completed
-from threading import Lock
 from .ui import C, progress_bar, progress_bar_eta, ETATracker
 
 DEFAULT_LLM_URL = "http://localhost:1234/v1/chat/completions"
 
-# ─── LLM request with retry + adaptive timeout ──────────────────────────────
 
 def _llm_request(url: str, model: str, prompt: str,
                  timeout: int = 300, max_retries: int = 3) -> str:
@@ -25,15 +22,14 @@ def _llm_request(url: str, model: str, prompt: str,
     for attempt in range(max_retries):
         try:
             req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-            cur_timeout = timeout * (1.5 ** attempt)  # 300 → 450 → 675
+            cur_timeout = timeout * (1.5 ** attempt)
             with urllib.request.urlopen(req, timeout=cur_timeout) as resp:
                 data = json.loads(resp.read())
             return data["choices"][0]["message"]["content"]
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             if attempt == max_retries - 1:
                 raise
-            wait = 2 ** (attempt + 1)  # 2s, 4s
-            time.sleep(wait)
+            time.sleep(2 ** (attempt + 1))
     return ""
 
 
@@ -111,17 +107,14 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
 
     del file_contents
 
-    # ─── Process batches with concurrent workers ─────────────────────────
-    workers = min(4, max(1, len(batches) // 10))  # 1-4 workers based on batch count
+    # ─── Sequential processing with retry ────────────────────────────────
     enriched = 0
-    completed = 0
     consecutive_errors = 0
-    stop = False
-    lock = Lock()
     eta = ETATracker(len(batches))
 
-    def _process_batch(idx_batch):
-        idx, batch = idx_batch
+    for idx, batch in enumerate(batches, 1):
+        progress_bar_eta(idx, len(batches), eta, f"batch {idx}/{len(batches)}")
+
         snippets = "".join(f"\n### `{uk}`\n```\n{s}\n```\n" for _,_,s,uk in batch)
         prompt = (
             'Analyze these code snippets and provide concise summaries.\n'
@@ -129,73 +122,31 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
             'Return ONLY a JSON object where each key is the exact header string '
             '(e.g. "type:name:file") mapped to a 1-2 sentence summary.'
         )
-        result = _extract_json(_llm_request(llm_url, model, prompt))
-        return idx, batch, result
 
-    if workers <= 1:
-        # Sequential — simpler progress display
-        for idx, batch in enumerate(batches, 1):
-            if stop: break
-            progress_bar_eta(idx, len(batches), eta, f"batch {idx}/{len(batches)}")
-            try:
-                _, _, result = _process_batch((idx, batch))
-                eta.tick()
-                if result:
-                    result_lower = {k.lower(): v for k, v in result.items()}
-                    for _, n, _, uk in batch:
-                        for c in [uk, n["name"], f"{n['type']}_{n['name']}"]:
-                            if c in result: n["summary"] = result[c]; enriched += 1; break
-                            elif c.lower() in result_lower: n["summary"] = result_lower[c.lower()]; enriched += 1; break
-                consecutive_errors = 0
-            except urllib.error.HTTPError as e:
-                body = ""
-                try: body = e.read().decode(errors="ignore")[:300]
-                except Exception: pass
-                if e.code in (401,403):
-                    sys.stdout.write(f"\n   ✗ Auth failed ({e.code}). {body}\n"); break
-                consecutive_errors += 1
-                sys.stdout.write(f"\n   ⚠ Batch {idx} failed ({e.code}): {body[:150]}\n")
-                if consecutive_errors >= 5:
-                    sys.stdout.write(f"   ✗ Too many errors, skipping.\n"); break
-            except Exception as e:
-                consecutive_errors += 1
-                sys.stdout.write(f"\n   ⚠ Batch {idx}: {e}\n")
-                if consecutive_errors >= 5: break
-    else:
-        # Concurrent workers
-        sys.stdout.write(f"    {C.DIM}Using {workers} concurrent workers{C.RST}\n")
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            futures = {pool.submit(_process_batch, (i+1, b)): i for i, b in enumerate(batches)}
-            for future in as_completed(futures):
-                with lock:
-                    completed += 1
-                    eta.tick()
-                    progress_bar_eta(completed, len(batches), eta, f"{completed}/{len(batches)}")
-                try:
-                    idx, batch, result = future.result()
-                    if result:
-                        result_lower = {k.lower(): v for k, v in result.items()}
-                        with lock:
-                            for _, n, _, uk in batch:
-                                for c in [uk, n["name"], f"{n['type']}_{n['name']}"]:
-                                    if c in result: n["summary"] = result[c]; enriched += 1; break
-                                    elif c.lower() in result_lower: n["summary"] = result_lower[c.lower()]; enriched += 1; break
-                            consecutive_errors = 0
-                except urllib.error.HTTPError as e:
-                    if e.code in (401,403):
-                        sys.stdout.write(f"\n   ✗ Auth failed ({e.code}).\n")
-                        pool.shutdown(wait=False, cancel_futures=True); break
-                    with lock:
-                        consecutive_errors += 1
-                        sys.stdout.write(f"\n   ⚠ Batch failed ({e.code})\n")
-                        if consecutive_errors >= 5:
-                            sys.stdout.write(f"   ✗ Too many errors, stopping.\n")
-                            pool.shutdown(wait=False, cancel_futures=True); break
-                except Exception as e:
-                    with lock:
-                        consecutive_errors += 1
-                        sys.stdout.write(f"\n   ⚠ {e}\n")
-                        if consecutive_errors >= 5:
-                            pool.shutdown(wait=False, cancel_futures=True); break
+        try:
+            result = _extract_json(_llm_request(llm_url, model, prompt))
+            eta.tick()
+            if result:
+                result_lower = {k.lower(): v for k, v in result.items()}
+                for _, n, _, uk in batch:
+                    for c in [uk, n["name"], f"{n['type']}_{n['name']}"]:
+                        if c in result: n["summary"] = result[c]; enriched += 1; break
+                        elif c.lower() in result_lower: n["summary"] = result_lower[c.lower()]; enriched += 1; break
+            consecutive_errors = 0
+        except urllib.error.HTTPError as e:
+            body = ""
+            try: body = e.read().decode(errors="ignore")[:300]
+            except Exception: pass
+            if e.code in (401,403):
+                sys.stdout.write(f"\n   ✗ Auth failed ({e.code}). {body}\n"); break
+            consecutive_errors += 1
+            batch_chars = sum(len(s) for _,_,s,_ in batch)
+            sys.stdout.write(f"\n   ⚠ Batch {idx} failed ({e.code}): {body[:150]}\n")
+            if consecutive_errors >= 5:
+                sys.stdout.write(f"   ✗ Too many errors, skipping.\n"); break
+        except Exception as e:
+            consecutive_errors += 1
+            sys.stdout.write(f"\n   ⚠ Batch {idx}: {e}\n")
+            if consecutive_errors >= 5: break
 
     return enriched
