@@ -3,6 +3,12 @@
 
 import json, os, sys, webbrowser
 from pathlib import Path
+
+# Force unbuffered stdout for real-time progress bars on Windows
+if hasattr(sys.stdout, 'reconfigure'):
+    sys.stdout.reconfigure(write_through=True)
+elif not getattr(sys.stdout, 'isatty', lambda: False)():
+    sys.stdout = os.fdopen(sys.stdout.fileno(), 'w', buffering=1)
 from collections import defaultdict
 from datetime import datetime, timezone
 

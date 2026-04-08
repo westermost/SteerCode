@@ -1,6 +1,15 @@
 import sys, os
 from typing import List, Tuple
 
+# Enable ANSI escape sequences on Windows
+if sys.platform == "win32":
+    try:
+        import ctypes
+        ctypes.windll.kernel32.SetConsoleMode(
+            ctypes.windll.kernel32.GetStdHandle(-11), 7)
+    except Exception:
+        pass
+
 class C:
     RST = "\033[0m"; BOLD = "\033[1m"; DIM = "\033[2m"
     GREEN = "\033[32m"; BGREEN = "\033[92m"; YELLOW = "\033[33m"
