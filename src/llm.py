@@ -347,11 +347,17 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
         return idx, joined_bid, combined_result, combined_missing, status, latency
 
     max_workers = min(3, max(1, len(batches) // 2))
+    sys.stdout.write(f"    {C.DIM}Sending to LLM ({max_workers} workers)... waiting for first response{C.RST}")
+    sys.stdout.flush()
+    first_response = True
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_process_one, (i, b)): i for i, b in enumerate(batches)}
 
         for future in as_completed(futures):
+            if first_response:
+                sys.stdout.write("\r\033[K")
+                first_response = False
             done_count = sum(1 for f in futures if f.done())
             try:
                 idx, bid, result_map, missing, status, latency = future.result(timeout=600)
