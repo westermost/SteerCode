@@ -154,7 +154,10 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
 
     # Fingerprints for incremental
     fp_path = output_dir / "fingerprints.json"
+    sys.stdout.write(f"    {C.DIM}Computing fingerprints...{C.RST}")
+    sys.stdout.flush()
     new_fps = compute_fingerprints(root, files)
+    sys.stdout.write(f"\r\033[K")
     old_fps = load_fingerprints(fp_path) if not getattr(args, "full", False) else None
     if old_fps:
         diff = diff_fingerprints(old_fps, new_fps)

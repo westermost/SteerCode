@@ -111,11 +111,12 @@ def scan_files(root: Path, on_progress=None) -> List[Path]:
 # ─── Fingerprints (Incremental) ──────────────────────────────────────────────
 
 def compute_fingerprints(root: Path, files: List[Path]) -> Dict[str, str]:
-    """MD5 hash per file content."""
+    """Fast fingerprint: size + mtime (no file read needed)."""
     fps = {}
     for f in files:
         try:
-            fps[str(f.relative_to(root)).replace("\\", "/")] = hashlib.md5(f.read_bytes()).hexdigest()
+            st = f.stat()
+            fps[str(f.relative_to(root)).replace("\\", "/")] = f"{st.st_size}:{int(st.st_mtime)}"
         except Exception:
             pass
     return fps
