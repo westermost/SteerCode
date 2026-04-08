@@ -127,15 +127,14 @@ def _detect_python(root: Path, result: Dict):
 
 
 def _detect_go(root: Path, result: Dict):
-    for gomod in root.rglob("go.mod"):
-        if ".git" in str(gomod) or "vendor" in str(gomod): continue
-        content = gomod.read_text(errors="ignore")
-        m = re.search(r'^go\s+([\d.]+)', content, re.MULTILINE)
-        if m: result["runtime"]["go"] = m.group(1)
-        reqs = re.findall(r'^\t([\w./\-]+)\s+(v[\d.]+)', content, re.MULTILINE)
-        if reqs:
-            result["packages"]["go"] = {"count": len(reqs), "key": dict(reqs[:10])}
-        break
+    gomod = root / "go.mod"
+    if not gomod.exists(): return
+    content = gomod.read_text(errors="ignore")
+    m = re.search(r'^go\s+([\d.]+)', content, re.MULTILINE)
+    if m: result["runtime"]["go"] = m.group(1)
+    reqs = re.findall(r'^\t([\w./\-]+)\s+(v[\d.]+)', content, re.MULTILINE)
+    if reqs:
+        result["packages"]["go"] = {"count": len(reqs), "key": dict(reqs[:10])}
 
 
 def _detect_ruby(root: Path, result: Dict):
@@ -165,7 +164,7 @@ def _detect_docker(root: Path, result: Dict):
         for m in re.finditer(r'FROM\s+([^\s]+)', content):
             image = m.group(1)
             if image.startswith("$"): continue
-            if "docker" not in result["runtime"]:
+            if "docker_base" not in result["runtime"]:
                 result["runtime"]["docker_base"] = image
 
 
