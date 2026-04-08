@@ -1,5 +1,6 @@
 import re, hashlib
 from pathlib import Path
+from collections import defaultdict
 from dataclasses import asdict
 from typing import List, Dict, Set, Tuple
 from .types import GraphNode, GraphEdge, Layer
