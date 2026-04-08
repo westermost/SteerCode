@@ -15,6 +15,18 @@ def make_id(path: str, name: str = "") -> str:
     return hashlib.md5(raw.encode()).hexdigest()[:12]
 
 
+def _build_summary(base: str, params: list, decorators: list, sem) -> str:
+    """Build a rich summary from semantic info when no LLM is available."""
+    parts = [base]
+    if params: parts[0] += f" ({', '.join(params[:5])})"
+    if decorators: parts.append(f"@{','.join(decorators[:3])}")
+    if sem.execution_role: parts.append(sem.execution_role)
+    if sem.domain_hint: parts.append(f"[{sem.domain_hint}]")
+    effects = [e.type for e in sem.side_effects]
+    if effects: parts.append("→ " + ", ".join(effects[:3]))
+    return " · ".join(parts) if len(parts) > 1 else parts[0]
+
+
 def build_graph(root: Path, files: List[Path]) -> dict:
     ctx = _GraphContext()
     _parse_files(ctx, root, files)
@@ -74,8 +86,6 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
             ctx.symbol_map[fn["name"]] = nid
             fn_lines = fn["line_end"] - fn["line_start"] + 1
             fn_source = "\n".join(content.splitlines()[fn["line_start"]-1:fn["line_end"]])
-            summary = f"Function with {len(fn['params'])} params" if fn["params"] else "Function"
-            if fn.get("decorators"): summary += f" @{','.join(fn['decorators'])}"
             # Lightweight per-function: inherit file effects, detect role from name
             sem = SemanticInfo(
                 side_effects=file_sem.side_effects[:],
@@ -83,6 +93,7 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
                 domain_hint=_detect_domain(fn["name"], fn_source, rel),
                 execution_role=_detect_role(fn["name"], rel),
             )
+            summary = _build_summary("Function", fn["params"], fn.get("decorators", []), sem)
             node = asdict(GraphNode(id=nid, type="function", name=fn["name"], file_path=rel,
                 line_range=(fn["line_start"], fn["line_end"]), summary=summary,
                 tags=fn.get("decorators", []), language=lang, complexity=estimate_complexity(fn_lines, fn_source, lang)))
@@ -95,14 +106,14 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
             ctx.symbol_map[cls["name"]] = nid
             cls_lines = cls["line_end"] - cls["line_start"] + 1
             cls_source = "\n".join(content.splitlines()[cls["line_start"]-1:cls["line_end"]])
-            summary = f"Class with {len(cls['methods'])} methods"
-            if cls.get("bases"): summary += f", extends {', '.join(cls['bases'])}"
             sem = SemanticInfo(
                 side_effects=file_sem.side_effects[:],
                 control_flow=file_sem.control_flow[:],
                 domain_hint=_detect_domain(cls["name"], cls_source, rel),
                 execution_role=_detect_role(cls["name"], rel),
             )
+            base_info = f", extends {', '.join(cls['bases'])}" if cls.get("bases") else ""
+            summary = _build_summary(f"Class with {len(cls['methods'])} methods{base_info}", [], cls.get("decorators", []), sem)
             node = asdict(GraphNode(id=nid, type="class", name=cls["name"], file_path=rel,
                 line_range=(cls["line_start"], cls["line_end"]), summary=summary,
                 tags=cls.get("decorators", []), language=lang, complexity=estimate_complexity(cls_lines, cls_source, lang)))
