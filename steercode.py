@@ -162,7 +162,7 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     if old_fps:
         diff = diff_fingerprints(old_fps, new_fps)
         changed = len(diff["added"]) + len(diff["modified"]) + len(diff["removed"])
-        if changed == 0:
+        if changed == 0 and not use_llm:
             phase_done("No files changed since last run", 0)
             save_fingerprints(new_fps, fp_path)
             return
