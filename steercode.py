@@ -9,7 +9,9 @@ from datetime import datetime, timezone
 from src import (
     scan_files, detect_language, build_graph, detect_layers,
     enrich_with_llm, generate_dashboard, generate_steering,
+    detect_versions,
     C, banner, phase_header, phase_done, table, summary_box, prompt,
+    TOOL_NAMES,
 )
 
 # ─── Config Persistence ──────────────────────────────────────────────────────
@@ -61,54 +63,67 @@ def interactive_setup() -> dict:
     no_open = prompt("Open dashboard in browser?", saved.get("open_browser", "yes"), ["yes", "no"]) == "no"
     print()
 
+    # Tool selection
+    print(f"  {C.WHITE}Steering Targets{C.RST} {C.DIM}(which AI tools to generate steering for){C.RST}")
+    print(f"    {C.DIM}Available: {', '.join(TOOL_NAMES)}{C.RST}")
+    tools_input = prompt("Tools (comma-separated, or 'all')", saved.get("tools", "all"))
+    if tools_input.strip().lower() == "all":
+        selected_tools = None
+    else:
+        selected_tools = [t.strip().lower() for t in tools_input.split(",") if t.strip().lower() in TOOL_NAMES]
+        if not selected_tools:
+            print(f"    {C.YELLOW}⚠ No valid tools, using all{C.RST}")
+            selected_tools = None
+    print()
+
     save_config({"last_path": str(p), "use_llm": use_llm, "llm_url": llm_url,
         "model": model, "context_size": context_size, "output": output,
-        "open_browser": "no" if no_open else "yes"})
+        "open_browser": "no" if no_open else "yes",
+        "tools": tools_input})
     print(f"  {C.DIM}Settings saved to {CONFIG_PATH}{C.RST}\n")
 
     return {"path": [str(p)], "output": output, "no_open": no_open, "json_only": False,
-            "llm": llm_url, "model": model, "context_size": context_size}
+            "llm": llm_url, "model": model, "context_size": context_size,
+            "tools": selected_tools}
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
-def main():
-    import argparse, time
+def _parse_args():
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="SteerCode — Scan your codebase. Steer your AI.",
+        epilog="Example: python steercode.py ./my-project -o .codemap-output")
+    parser.add_argument("path", nargs="*", default=["."], help="Path to codebase")
+    parser.add_argument("-o", "--output", default=".codemap-output", help="Output directory")
+    parser.add_argument("--no-open", action="store_true", help="Don't open dashboard in browser")
+    parser.add_argument("--json-only", action="store_true", help="Only output JSON, skip dashboard")
+    parser.add_argument("--llm", default="", help="Local LLM URL (e.g. http://localhost:1234)")
+    parser.add_argument("--model", default="", help="Model name (optional)")
+    parser.add_argument("--context-size", type=int, default=8192, help="LLM context size in tokens")
+    parser.add_argument("--max-enrich", type=int, default=0, help="Max nodes to enrich with LLM")
+    parser.add_argument("--tools", default=None, help=f"Comma-separated AI tools to generate steering for ({','.join(TOOL_NAMES)})")
+    args = parser.parse_args()
+    if args.tools:
+        args.tools = [t.strip().lower() for t in args.tools.split(",") if t.strip().lower() in TOOL_NAMES]
+        if not args.tools: args.tools = None
+    return args
 
-    if len(sys.argv) == 1:
-        cfg = interactive_setup()
-        class Args: pass
-        args = Args()
-        for k, v in cfg.items(): setattr(args, k, v)
-    else:
-        parser = argparse.ArgumentParser(
-            description="SteerCode — Scan your codebase. Steer your AI.",
-            epilog="Example: python steercode.py ./my-project -o .codemap-output")
-        parser.add_argument("path", nargs="*", default=["."], help="Path to codebase")
-        parser.add_argument("-o", "--output", default=".codemap-output", help="Output directory")
-        parser.add_argument("--no-open", action="store_true", help="Don't open dashboard in browser")
-        parser.add_argument("--json-only", action="store_true", help="Only output JSON, skip dashboard")
-        parser.add_argument("--llm", default="", help="Local LLM URL (e.g. http://localhost:1234)")
-        parser.add_argument("--model", default="", help="Model name (optional)")
-        parser.add_argument("--context-size", type=int, default=8192, help="LLM context size in tokens")
-        parser.add_argument("--max-enrich", type=int, default=0, help="Max nodes to enrich with LLM")
-        args = parser.parse_args()
 
-    root = Path(" ".join(args.path)).resolve()
-    if not root.is_dir():
-        print(f"{C.RED}  ✗ Error: {root} is not a directory{C.RST}"); sys.exit(1)
-
-    output_dir = (root / args.output) if not Path(args.output).is_absolute() else Path(args.output)
-    llm_url = getattr(args, "llm", "")
-    use_llm = bool(llm_url)
-
-    banner()
-    print(f"  {C.WHITE}Project:{C.RST}  {C.BOLD}{root.name}{C.RST}")
-    print(f"  {C.WHITE}Path:{C.RST}     {C.DIM}{root}{C.RST}")
-    if use_llm:
-        print(f"  {C.WHITE}LLM:{C.RST}      {C.MAGENTA}{llm_url}{C.RST}")
-    print()
-
+def _run_pipeline(args, root, output_dir, llm_url, use_llm):
+    import time
     t0 = time.time()
+
+    # Auto-add output dir to .gitignore if git repo exists
+    gitignore = root / ".gitignore"
+    if (root / ".git").is_dir():
+        output_rel = str(output_dir.relative_to(root)) + "/" if output_dir.is_relative_to(root) else None
+        if output_rel:
+            existing = gitignore.read_text(errors="ignore") if gitignore.exists() else ""
+            if output_rel.rstrip("/") not in existing and output_rel not in existing:
+                with open(gitignore, "a") as f:
+                    if existing and not existing.endswith("\n"): f.write("\n")
+                    f.write(f"\n# SteerCode output\n{output_rel}\n")
+
     total_phases = 5 if use_llm else 4
     phase = 0
 
@@ -156,11 +171,19 @@ def main():
     print()
 
     # Assemble graph
+    # Detect versions
+    llm_ver_fn = None
+    if use_llm:
+        from src.llm import _llm_request
+        llm_ver_fn = lambda prompt: _llm_request(llm_url, args.model, prompt)
+    versions = detect_versions(root, llm_fn=llm_ver_fn)
+
     graph_data = {
         "version": "1.0.0",
         "project": {"name": root.name, "languages": list(lang_counts.keys()),
             "description": f"Knowledge graph for {root.name}",
-            "analyzedAt": datetime.now(timezone.utc).isoformat(), "llmEnriched": use_llm},
+            "analyzedAt": datetime.now(timezone.utc).isoformat(), "llmEnriched": use_llm,
+            "versions": versions},
         "nodes": result["nodes"], "edges": result["edges"], "layers": layer_data,
     }
 
@@ -175,7 +198,7 @@ def main():
     phase += 1
     phase_header(phase, total_phases, "Generating dashboard")
     dash_path, kg_path = generate_dashboard(graph_data, output_dir)
-    steering_paths = generate_steering(graph_data, root, output_dir)
+    steering_paths = generate_steering(graph_data, root, output_dir, getattr(args, "tools", None))
     t4 = time.time()
     phase_done(f"Dashboard + {len(steering_paths)} steering files ready", t4 - t3)
 
@@ -191,6 +214,33 @@ def main():
     if not getattr(args, "no_open", False):
         print(f"  {C.BLUE}Opening dashboard in browser...{C.RST}\n")
         webbrowser.open(f"file://{dash_path}")
+
+
+def main():
+    if len(sys.argv) == 1:
+        cfg = interactive_setup()
+        class Args: pass
+        args = Args()
+        for k, v in cfg.items(): setattr(args, k, v)
+    else:
+        args = _parse_args()
+
+    root = Path(" ".join(args.path)).resolve()
+    if not root.is_dir():
+        print(f"{C.RED}  ✗ Error: {root} is not a directory{C.RST}"); sys.exit(1)
+
+    output_dir = (root / args.output) if not Path(args.output).is_absolute() else Path(args.output)
+    llm_url = getattr(args, "llm", "")
+    use_llm = bool(llm_url)
+
+    banner()
+    print(f"  {C.WHITE}Project:{C.RST}  {C.BOLD}{root.name}{C.RST}")
+    print(f"  {C.WHITE}Path:{C.RST}     {C.DIM}{root}{C.RST}")
+    if use_llm:
+        print(f"  {C.WHITE}LLM:{C.RST}      {C.MAGENTA}{llm_url}{C.RST}")
+    print()
+
+    _run_pipeline(args, root, output_dir, llm_url, use_llm)
 
 if __name__ == "__main__":
     main()
