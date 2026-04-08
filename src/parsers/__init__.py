@@ -8,9 +8,10 @@ To add a new language parser:
 """
 
 from typing import List
-from ..types import ParseResult
+from ..types import ParseResult, SemanticInfo
 from .python_parser import parse_python
 from .regex_parser import parse_with_regex, RE_PATTERNS
+from .semantics import extract_semantics
 
 def parse_file(content: str, lang: str, path: str) -> ParseResult:
     if lang == "python": return parse_python(content, path)

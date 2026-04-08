@@ -5,6 +5,7 @@ from typing import List, Dict, Set, Tuple
 from .types import GraphNode, GraphEdge, Layer
 from .scanner import detect_language, CODE_LANGS
 from .parsers import parse_file
+from .parsers.semantics import extract_semantics
 from .ui import progress_bar
 from .complexity import estimate_complexity
 
@@ -62,6 +63,7 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
         if lang not in CODE_LANGS: continue
         ctx.file_contents[rel] = content
         parsed = parse_file(content, lang, rel)
+        import_sources = [imp.get("source", "") for imp in parsed.imports]
 
         for fn in parsed.functions:
             nid = make_id(rel, fn["name"])
@@ -70,9 +72,12 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
             fn_source = "\n".join(content.splitlines()[fn["line_start"]-1:fn["line_end"]])
             summary = f"Function with {len(fn['params'])} params" if fn["params"] else "Function"
             if fn.get("decorators"): summary += f" @{','.join(fn['decorators'])}"
-            ctx.add_node(asdict(GraphNode(id=nid, type="function", name=fn["name"], file_path=rel,
+            sem = extract_semantics(fn_source, fn["name"], rel, import_sources, lang)
+            node = asdict(GraphNode(id=nid, type="function", name=fn["name"], file_path=rel,
                 line_range=(fn["line_start"], fn["line_end"]), summary=summary,
-                tags=fn.get("decorators", []), language=lang, complexity=estimate_complexity(fn_lines, fn_source, lang))))
+                tags=fn.get("decorators", []), language=lang, complexity=estimate_complexity(fn_lines, fn_source, lang)))
+            node["semantics"] = asdict(sem)
+            ctx.add_node(node)
             ctx.add_edge(fid, nid, "contains")
 
         for cls in parsed.classes:
@@ -82,9 +87,12 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
             cls_source = "\n".join(content.splitlines()[cls["line_start"]-1:cls["line_end"]])
             summary = f"Class with {len(cls['methods'])} methods"
             if cls.get("bases"): summary += f", extends {', '.join(cls['bases'])}"
-            ctx.add_node(asdict(GraphNode(id=nid, type="class", name=cls["name"], file_path=rel,
+            sem = extract_semantics(cls_source, cls["name"], rel, import_sources, lang)
+            node = asdict(GraphNode(id=nid, type="class", name=cls["name"], file_path=rel,
                 line_range=(cls["line_start"], cls["line_end"]), summary=summary,
-                tags=cls.get("decorators", []), language=lang, complexity=estimate_complexity(cls_lines, cls_source, lang))))
+                tags=cls.get("decorators", []), language=lang, complexity=estimate_complexity(cls_lines, cls_source, lang)))
+            node["semantics"] = asdict(sem)
+            ctx.add_node(node)
             ctx.add_edge(fid, nid, "contains")
             for base in cls.get("bases", []):
                 if base in ctx.symbol_map: ctx.add_edge(nid, ctx.symbol_map[base], "inherits", 0.8)
@@ -161,3 +169,56 @@ def detect_layers(nodes: List[dict]) -> List[dict]:
             elif lang in ("html","css"): layers["ui"].node_ids.append(node["id"])
             else: layers["service"].node_ids.append(node["id"])
     return [asdict(l) for l in layers.values() if l.node_ids]
+
+# ─── Graph Relationships ─────────────────────────────────────────────────────
+
+def get_callers(node_id: str, edges: List[dict]) -> List[str]:
+    """Get IDs of nodes that call this node."""
+    return [e["source"] for e in edges if e["target"] == node_id and e["type"] == "calls"]
+
+def get_callees(node_id: str, edges: List[dict]) -> List[str]:
+    """Get IDs of nodes that this node calls."""
+    return [e["target"] for e in edges if e["source"] == node_id and e["type"] == "calls"]
+
+# ─── Importance Scoring ──────────────────────────────────────────────────────
+
+def compute_importance(nodes: List[dict], edges: List[dict]) -> Dict[str, float]:
+    """Compute importance scores with decay by depth, normalized to percentile."""
+    direct_callers = defaultdict(set)
+    for e in edges:
+        if e["type"] == "calls": direct_callers[e["target"]].add(e["source"])
+
+    # Indirect callers (depth 2)
+    indirect_callers = defaultdict(set)
+    for target, callers in direct_callers.items():
+        for caller in callers:
+            for e in edges:
+                if e["type"] == "calls" and e["target"] == caller:
+                    indirect_callers[target].add(e["source"])
+
+    scores = {}
+    for n in nodes:
+        if n["type"] not in ("function", "class"): continue
+        nid = n["id"]
+        sem = n.get("semantics", {})
+        score = 0.0
+
+        effects = sem.get("side_effects", [])
+        if any("db_write" in str(e) for e in effects): score += 0.3
+        if any("external_api" in str(e) for e in effects): score += 0.3
+
+        score += min(len(direct_callers.get(nid, set())) * 0.1, 0.3)
+        score += min(len(indirect_callers.get(nid, set())) * 0.05, 0.15)
+
+        role = sem.get("execution_role", "")
+        if role in ("entry_point", "orchestrator"): score += 0.2
+        if n.get("complexity") == "complex": score += 0.1
+
+        scores[nid] = min(score, 1.0)
+
+    # Percentile normalization
+    if scores:
+        sorted_vals = sorted(set(scores.values()))
+        rank_map = {v: i / max(len(sorted_vals) - 1, 1) for i, v in enumerate(sorted_vals)}
+        scores = {k: round(rank_map[v], 3) for k, v in scores.items()}
+    return scores

@@ -26,17 +26,19 @@ python steercode.py
 ## What It Does
 
 ```
-Codebase → Scan → Parse → Knowledge Graph → Dashboard + Steering
-                                                         ↓
-                                                   AI writes better code
+Codebase → Scan → Parse → Semantic Analysis → Knowledge Graph → Dashboard + Steering
+                                                                       ↓
+                                                                 AI writes better code
 ```
 
 1. **Scans** your codebase (respects `.gitignore`, auto-adds output to `.gitignore`)
 2. **Parses** functions, classes, imports across 20+ languages
-3. **Detects** runtime versions, frameworks, and dependencies
-4. **Analyzes** complexity with language-aware and framework-aware rules
-5. **Builds** a knowledge graph with nodes, edges, and architectural layers
-6. **Generates**:
+3. **Extracts semantics** — side effects, business domain, execution role, control flow
+4. **Scores importance** — percentile-ranked by callers, side effects, role
+5. **Detects** runtime versions, frameworks, and dependencies
+6. **Analyzes** complexity with language-aware and framework-aware rules
+7. **Builds** a knowledge graph with nodes, edges, and architectural layers
+8. **Generates**:
    - `.codemap-output/knowledge-graph.json` — full graph for dashboard
    - `.codemap-output/graph-index.json` — layer index for AI progressive loading
    - `.codemap-output/layers/*.json` — per-layer chunks (fit any context window)
@@ -204,6 +206,20 @@ register_rules(
 - **Multi-language UI** — English, 한국어, 中文, 日本語, Español
 - **Dark theme**
 
+## Semantic Analysis (v0.2)
+
+Every function and class is analyzed for semantic signals — no LLM required:
+
+| Signal | Detection | Example |
+|---|---|---|
+| **Side effects** | Regex + import inference | `db_write:transactions`, `external_api:stripe` |
+| **Business domain** | Keyword matching | `payment`, `auth`, `user`, `email`, `storage` |
+| **Execution role** | Name + path patterns | `entry_point`, `orchestrator`, `validator`, `data_access`, `adapter` |
+| **Control flow** | Pattern detection | `branching`, `loop`, `try_catch`, `async` |
+| **Importance** | Graph analysis | Percentile score from callers, side effects, role, complexity |
+
+Side effects include confidence scores and source tagging (`regex` vs `import_inference`), with entity-level granularity (e.g. `external_api:stripe` not just `external_api`).
+
 ## Local LLM Support
 
 Optionally connect a local LLM for smart summaries (no cloud API needed):
@@ -222,10 +238,14 @@ python steercode.py . --llm http://localhost:1234 --model qwen2.5-coder --contex
 Compatible with any OpenAI-compatible API: LM Studio, Ollama, LocalAI, vLLM, text-generation-webui.
 
 **LLM enrichment features:**
+- **Structured batch** — `<FUNC id="fN">` format with semantic metadata, 10-20 files per batch
+- **Context-aware prompts** — callers, callees, importance scores injected into prompt
+- **Output validation** — checks all IDs returned, retries missing ones
+- **Batch cache** — idempotent, skips already-enriched batches on re-run
+- **Error classification** — timeout, rate_limit, auth, with appropriate retry strategy
+- **Metrics** — per-batch latency, success rate, token estimates saved to `metrics.json`
 - Retry with adaptive timeout (300s → 450s → 675s)
-- Concurrent workers (1-4, auto-scaled by batch count)
 - ETA countdown with rolling average speed
-- Unique key matching (`type:name:file`) — no missed nodes
 - Smart skip: test files, config files, vendored libraries
 - Priority: complex nodes first, simple last
 
@@ -270,7 +290,8 @@ src/
 ├── parsers/                  # Language parsers
 │   ├── __init__.py           # parse_file() dispatcher
 │   ├── python_parser.py      # Python AST parser
-│   └── regex_parser.py       # Regex parser (JS, Java, Go, etc.)
+│   ├── regex_parser.py       # Regex parser (JS, Java, Go, etc.)
+│   └── semantics.py          # Semantic extraction (side effects, domain, role)
 └── output/                   # Output generation
     ├── __init__.py
     ├── dashboard.py          # Dashboard + progressive disclosure

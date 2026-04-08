@@ -10,9 +10,17 @@ def _strip_defaults(graph_data: dict) -> dict:
     stripped["nodes"] = []
     for n in graph_data["nodes"]:
         node = {k: v for k, v in n.items()
-                if v and v != [] and v != (0, 0) and v != [0, 0] and v != "simple"}
+                if v and v != [] and v != (0, 0) and v != [0, 0] and v != "simple" and k != "semantics"}
         if n.get("complexity") and n["complexity"] != "simple":
             node["complexity"] = n["complexity"]
+        # Include semantic fields inline for dashboard
+        sem = n.get("semantics", {})
+        if sem:
+            if sem.get("domain_hint"): node["domain"] = sem["domain_hint"]
+            if sem.get("execution_role"): node["role"] = sem["execution_role"]
+            if sem.get("side_effects"):
+                node["effects"] = [e["type"] for e in sem["side_effects"]]
+            if sem.get("importance"): node["importance"] = sem["importance"]
         stripped["nodes"].append(node)
     stripped["edges"] = []
     for e in graph_data["edges"]:

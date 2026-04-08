@@ -3,3 +3,6 @@ __pycache__/
 *.pyc
 .kiro/
 .cursor/
+.agents/*
+docs/*
+skills-lock.json

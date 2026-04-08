@@ -156,7 +156,8 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
         phase += 1
         phase_header(phase, total_phases, f"Enriching summaries with {C.MAGENTA}local LLM{C.RST} {C.DIM}({llm_url}){C.RST}")
         enriched = enrich_with_llm(result["nodes"], result["edges"], root,
-            llm_url, args.model, getattr(args, "context_size", 8192), getattr(args, "max_enrich", 0))
+            llm_url, args.model, getattr(args, "context_size", 8192), getattr(args, "max_enrich", 0),
+            output_dir=output_dir)
         t_llm = time.time()
         phase_done(f"{enriched:,} nodes enriched", t_llm - t2)
         print(); t2 = t_llm
