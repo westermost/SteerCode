@@ -3,10 +3,10 @@ from pathlib import Path
 from collections import defaultdict
 from dataclasses import asdict
 from typing import List, Dict, Set, Tuple
-from .types import GraphNode, GraphEdge, Layer
+from .types import GraphNode, GraphEdge, Layer, SemanticInfo
 from .scanner import detect_language, CODE_LANGS
 from .parsers import parse_file
-from .parsers.semantics import extract_semantics
+from .parsers.semantics import extract_semantics, _detect_role, _detect_domain
 from .ui import progress_bar
 from .complexity import estimate_complexity
 
@@ -66,6 +66,9 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
         parsed = parse_file(content, lang, rel)
         import_sources = [imp.get("source", "") for imp in parsed.imports]
 
+        # Pre-compute file-level semantics once (fast), then per-function only name/role
+        file_sem = extract_semantics(content, fp.name, rel, import_sources, lang)
+
         for fn in parsed.functions:
             nid = make_id(rel, fn["name"])
             ctx.symbol_map[fn["name"]] = nid
@@ -73,7 +76,13 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
             fn_source = "\n".join(content.splitlines()[fn["line_start"]-1:fn["line_end"]])
             summary = f"Function with {len(fn['params'])} params" if fn["params"] else "Function"
             if fn.get("decorators"): summary += f" @{','.join(fn['decorators'])}"
-            sem = extract_semantics(fn_source, fn["name"], rel, import_sources, lang)
+            # Lightweight per-function: inherit file effects, detect role from name
+            sem = SemanticInfo(
+                side_effects=file_sem.side_effects[:],
+                control_flow=file_sem.control_flow[:],
+                domain_hint=_detect_domain(fn["name"], fn_source, rel),
+                execution_role=_detect_role(fn["name"], rel),
+            )
             node = asdict(GraphNode(id=nid, type="function", name=fn["name"], file_path=rel,
                 line_range=(fn["line_start"], fn["line_end"]), summary=summary,
                 tags=fn.get("decorators", []), language=lang, complexity=estimate_complexity(fn_lines, fn_source, lang)))
@@ -88,7 +97,12 @@ def _parse_files(ctx: '_GraphContext', root: Path, files: List[Path]):
             cls_source = "\n".join(content.splitlines()[cls["line_start"]-1:cls["line_end"]])
             summary = f"Class with {len(cls['methods'])} methods"
             if cls.get("bases"): summary += f", extends {', '.join(cls['bases'])}"
-            sem = extract_semantics(cls_source, cls["name"], rel, import_sources, lang)
+            sem = SemanticInfo(
+                side_effects=file_sem.side_effects[:],
+                control_flow=file_sem.control_flow[:],
+                domain_hint=_detect_domain(cls["name"], cls_source, rel),
+                execution_role=_detect_role(cls["name"], rel),
+            )
             node = asdict(GraphNode(id=nid, type="class", name=cls["name"], file_path=rel,
                 line_range=(cls["line_start"], cls["line_end"]), summary=summary,
                 tags=cls.get("decorators", []), language=lang, complexity=estimate_complexity(cls_lines, cls_source, lang)))
