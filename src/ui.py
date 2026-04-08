@@ -46,6 +46,61 @@ def progress_bar(current: int, total: int, label: str, width: int = 25):
     sys.stdout.flush()
     if current == total: sys.stdout.write("\n")
 
+
+import time as _time
+
+class ETATracker:
+    """Tracks elapsed time and estimates remaining time based on rolling average."""
+    def __init__(self, total: int, window: int = 20):
+        self.total = total
+        self._start = _time.monotonic()
+        self._times: list = []  # recent batch durations
+        self._window = window
+        self._last_tick = self._start
+
+    def tick(self):
+        now = _time.monotonic()
+        self._times.append(now - self._last_tick)
+        if len(self._times) > self._window:
+            self._times = self._times[-self._window:]
+        self._last_tick = now
+
+    def eta_str(self, current: int) -> str:
+        if not self._times or current == 0:
+            return "ETA --:--"
+        avg = sum(self._times) / len(self._times)
+        remaining = (self.total - current) * avg
+        return f"ETA {self._fmt(remaining)}"
+
+    def elapsed_str(self) -> str:
+        return self._fmt(_time.monotonic() - self._start)
+
+    def speed_str(self, current: int) -> str:
+        elapsed = _time.monotonic() - self._start
+        if elapsed < 1: return ""
+        return f"{current / elapsed:.1f}/s"
+
+    @staticmethod
+    def _fmt(secs: float) -> str:
+        m, s = divmod(int(secs), 60)
+        h, m = divmod(m, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
+
+def progress_bar_eta(current: int, total: int, eta: 'ETATracker', label: str = "", width: int = 20):
+    pct = current / total if total else 1
+    filled = int(width * pct)
+    bar = f"{C.BGREEN}{'█'*filled}{C.GREEN}{'░'*(width-filled)}{C.RST}"
+    pct_str = f"{pct*100:3.0f}%"
+    counter = f"{current}/{total}"
+    speed = eta.speed_str(current)
+    eta_s = eta.eta_str(current) if current < total else f"done {eta.elapsed_str()}"
+    info = f"{counter} {speed} {eta_s}"
+    max_label = max(8, _cols() - width - len(info) - 16)
+    sys.stdout.write(f"\r\033[K  {C.GREEN}  {bar} {C.DIM}{pct_str} {info}{C.RST} {C.GREEN}{label[:max_label]}{C.RST}")
+    sys.stdout.flush()
+    if current == total: sys.stdout.write("\n")
+
 def table(rows: List[Tuple[str, str]], indent: int = 6):
     if not rows: return
     max_k = max(len(r[0]) for r in rows)

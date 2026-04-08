@@ -1,12 +1,17 @@
-import sys, json, re, urllib.request, urllib.error
+import sys, json, re, time, urllib.request, urllib.error
 from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional
-from .ui import C, progress_bar
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
+from .ui import C, progress_bar, progress_bar_eta, ETATracker
 
 DEFAULT_LLM_URL = "http://localhost:1234/v1/chat/completions"
 
-def _llm_request(url: str, model: str, prompt: str) -> str:
+# ─── LLM request with retry + adaptive timeout ──────────────────────────────
+
+def _llm_request(url: str, model: str, prompt: str,
+                 timeout: int = 300, max_retries: int = 3) -> str:
     if not url.endswith("/chat/completions"):
         url = url.rstrip("/")
         if url.endswith("/v1/completions"):
@@ -16,10 +21,21 @@ def _llm_request(url: str, model: str, prompt: str) -> str:
     payload = {"max_tokens": 4096, "messages": [{"role": "user", "content": prompt}]}
     if model: payload["model"] = model
     body = json.dumps(payload).encode()
-    req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=300) as resp:
-        data = json.loads(resp.read())
-    return data["choices"][0]["message"]["content"]
+
+    for attempt in range(max_retries):
+        try:
+            req = urllib.request.Request(url, data=body, headers={"Content-Type": "application/json"})
+            cur_timeout = timeout * (1.5 ** attempt)  # 300 → 450 → 675
+            with urllib.request.urlopen(req, timeout=cur_timeout) as resp:
+                data = json.loads(resp.read())
+            return data["choices"][0]["message"]["content"]
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            if attempt == max_retries - 1:
+                raise
+            wait = 2 ** (attempt + 1)  # 2s, 4s
+            time.sleep(wait)
+    return ""
+
 
 def _extract_json(text: str) -> Optional[dict]:
     text = text.strip()
@@ -34,6 +50,8 @@ def _extract_json(text: str) -> Optional[dict]:
         except json.JSONDecodeError: pass
     return None
 
+# ─── Enrichment ──────────────────────────────────────────────────────────────
+
 def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
                      llm_url: str, model: str = "",
                      context_size: int = 8192, max_enrich: int = 0) -> int:
@@ -41,15 +59,19 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
 
     ENRICH_LANGS = {"python","javascript","typescript","java","go","rust","c","cpp",
                     "csharp","ruby","php","swift","kotlin","scala","lua","shell","sql"}
+    SKIP_PATHS = {"test","tests","spec","specs","__tests__","e2e"}
 
     enrichable = [n for n in nodes if n["type"] in ("function","class","file")
-                  and n.get("file_path") and n.get("language","") in ENRICH_LANGS]
+                  and n.get("file_path") and n.get("language","") in ENRICH_LANGS
+                  and not (SKIP_PATHS & set(n["file_path"].lower().split("/")))]
     if not enrichable: return 0
 
     skipped_fe = sum(1 for n in nodes if n["type"] in ("function","class","file")
-                     and n.get("language","") in {"css","html","markdown","json","yaml","toml","xml","dockerfile","terraform"})
-    if skipped_fe:
-        sys.stdout.write(f"\n    {C.DIM}Skipping {skipped_fe} frontend/config nodes{C.RST}\n")
+                     and n.get("language","") in {"css","html","markdown","json","yaml","toml","xml","dockerfile","terraform","makefile"})
+    skipped_test = sum(1 for n in nodes if n["type"] in ("function","class","file")
+                       and n.get("file_path") and (SKIP_PATHS & set(n["file_path"].lower().split("/"))))
+    if skipped_fe or skipped_test:
+        sys.stdout.write(f"\n    {C.DIM}Skipping {skipped_fe} config/frontend + {skipped_test} test nodes{C.RST}\n")
 
     comp_score = {"complex":3, "moderate":2, "simple":1}
     type_score = {"class":2, "file":1.5, "function":1}
@@ -61,15 +83,16 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
     else:
         sys.stdout.write(f"    {C.DIM}Enriching {len(enrichable)} backend nodes{C.RST}\n")
 
-    # Group by file, build batches
-    file_contents: Dict[str, list] = {}
+    # Read file contents once
+    file_contents: Dict[str, Optional[list]] = {}
     for n in enrichable:
         fp = n["file_path"]
         if fp not in file_contents:
             try: file_contents[fp] = (root / fp).read_text(errors="ignore").splitlines()
             except Exception: file_contents[fp] = None
 
-    batches: List[List[Tuple[str, dict, str, str]]] = []  # (fpath, node, snippet, unique_key)
+    # Build batches preserving priority order
+    batches: List[List[Tuple[str, dict, str, str]]] = []
     current_batch, current_chars = [], 0
 
     for n in enrichable:
@@ -86,33 +109,93 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
         current_batch.append((fpath, n, snippet, unique_key)); current_chars += cost
     if current_batch: batches.append(current_batch)
 
-    enriched, consecutive_errors = 0, 0
-    for idx, batch in enumerate(batches, 1):
-        progress_bar(idx, len(batches), f"Enriching batch {idx}/{len(batches)}")
-        snippets = "".join(f"\n### `{uk}`\n```\n{s}\n```\n" for _,_,s,uk in batch)
-        prompt = f'Analyze these code snippets and provide concise summaries.\n{snippets}\nReturn ONLY a JSON object where each key is the exact header string (e.g. "type:name:file") mapped to a 1-2 sentence summary.'
+    del file_contents
 
-        try:
-            result = _extract_json(_llm_request(llm_url, model, prompt))
-            if result:
-                result_lower = {k.lower(): v for k, v in result.items()}
-                for _, n, _, uk in batch:
-                    for c in [uk, n["name"], f"{n['type']}_{n['name']}"]:
-                        if c in result: n["summary"] = result[c]; enriched += 1; break
-                        elif c.lower() in result_lower: n["summary"] = result_lower[c.lower()]; enriched += 1; break
-            consecutive_errors = 0
-        except urllib.error.HTTPError as e:
-            body = ""
-            try: body = e.read().decode(errors="ignore")[:300]
-            except Exception: pass
-            if e.code in (401,403): sys.stdout.write(f"\n   ✗ Auth failed ({e.code}). {body}\n"); break
-            consecutive_errors += 1
-            batch_chars = sum(len(s) for _,_,s,_ in batch)
-            sys.stdout.write(f"\n   ⚠ Batch {idx} failed ({e.code}): {body[:150]}\n")
-            sys.stdout.write(f"     {C.DIM}~{batch_chars} chars{C.RST}\n")
-            if consecutive_errors >= 5: sys.stdout.write(f"   ✗ Too many errors, skipping.\n"); break
-        except Exception as e:
-            consecutive_errors += 1
-            sys.stdout.write(f"\n   ⚠ Batch {idx}: {e}\n")
-            if consecutive_errors >= 5: break
+    # ─── Process batches with concurrent workers ─────────────────────────
+    workers = min(4, max(1, len(batches) // 10))  # 1-4 workers based on batch count
+    enriched = 0
+    completed = 0
+    consecutive_errors = 0
+    stop = False
+    lock = Lock()
+    eta = ETATracker(len(batches))
+
+    def _process_batch(idx_batch):
+        idx, batch = idx_batch
+        snippets = "".join(f"\n### `{uk}`\n```\n{s}\n```\n" for _,_,s,uk in batch)
+        prompt = (
+            'Analyze these code snippets and provide concise summaries.\n'
+            f'{snippets}\n'
+            'Return ONLY a JSON object where each key is the exact header string '
+            '(e.g. "type:name:file") mapped to a 1-2 sentence summary.'
+        )
+        result = _extract_json(_llm_request(llm_url, model, prompt))
+        return idx, batch, result
+
+    if workers <= 1:
+        # Sequential — simpler progress display
+        for idx, batch in enumerate(batches, 1):
+            if stop: break
+            progress_bar_eta(idx, len(batches), eta, f"batch {idx}/{len(batches)}")
+            try:
+                _, _, result = _process_batch((idx, batch))
+                eta.tick()
+                if result:
+                    result_lower = {k.lower(): v for k, v in result.items()}
+                    for _, n, _, uk in batch:
+                        for c in [uk, n["name"], f"{n['type']}_{n['name']}"]:
+                            if c in result: n["summary"] = result[c]; enriched += 1; break
+                            elif c.lower() in result_lower: n["summary"] = result_lower[c.lower()]; enriched += 1; break
+                consecutive_errors = 0
+            except urllib.error.HTTPError as e:
+                body = ""
+                try: body = e.read().decode(errors="ignore")[:300]
+                except Exception: pass
+                if e.code in (401,403):
+                    sys.stdout.write(f"\n   ✗ Auth failed ({e.code}). {body}\n"); break
+                consecutive_errors += 1
+                sys.stdout.write(f"\n   ⚠ Batch {idx} failed ({e.code}): {body[:150]}\n")
+                if consecutive_errors >= 5:
+                    sys.stdout.write(f"   ✗ Too many errors, skipping.\n"); break
+            except Exception as e:
+                consecutive_errors += 1
+                sys.stdout.write(f"\n   ⚠ Batch {idx}: {e}\n")
+                if consecutive_errors >= 5: break
+    else:
+        # Concurrent workers
+        sys.stdout.write(f"    {C.DIM}Using {workers} concurrent workers{C.RST}\n")
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = {pool.submit(_process_batch, (i+1, b)): i for i, b in enumerate(batches)}
+            for future in as_completed(futures):
+                with lock:
+                    completed += 1
+                    eta.tick()
+                    progress_bar_eta(completed, len(batches), eta, f"{completed}/{len(batches)}")
+                try:
+                    idx, batch, result = future.result()
+                    if result:
+                        result_lower = {k.lower(): v for k, v in result.items()}
+                        with lock:
+                            for _, n, _, uk in batch:
+                                for c in [uk, n["name"], f"{n['type']}_{n['name']}"]:
+                                    if c in result: n["summary"] = result[c]; enriched += 1; break
+                                    elif c.lower() in result_lower: n["summary"] = result_lower[c.lower()]; enriched += 1; break
+                            consecutive_errors = 0
+                except urllib.error.HTTPError as e:
+                    if e.code in (401,403):
+                        sys.stdout.write(f"\n   ✗ Auth failed ({e.code}).\n")
+                        pool.shutdown(wait=False, cancel_futures=True); break
+                    with lock:
+                        consecutive_errors += 1
+                        sys.stdout.write(f"\n   ⚠ Batch failed ({e.code})\n")
+                        if consecutive_errors >= 5:
+                            sys.stdout.write(f"   ✗ Too many errors, stopping.\n")
+                            pool.shutdown(wait=False, cancel_futures=True); break
+                except Exception as e:
+                    with lock:
+                        consecutive_errors += 1
+                        sys.stdout.write(f"\n   ⚠ {e}\n")
+                        if consecutive_errors >= 5:
+                            pool.shutdown(wait=False, cancel_futures=True); break
+
     return enriched

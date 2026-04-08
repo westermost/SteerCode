@@ -141,7 +141,7 @@ LAYER_RULES = [
     ("data",    "Data / Storage",   ["model","schema","entity","repository","repo","dao","migration","database","db","store"]),
     ("infra",   "Infrastructure",   ["config","middleware","plugin","util","helper","lib","common","shared","infra","infrastructure"]),
     ("test",    "Tests",            ["test","spec","tests","specs","__tests__","e2e","integration"]),
-    ("docs",    "Documentation",    ["doc","docs","readme","guide","tutorial"]),
+    ("docs",    "Documentation",    ["docs","readme","guide","tutorial","documentation"]),
 ]
 
 def detect_layers(nodes: List[dict]) -> List[dict]:
@@ -149,13 +149,15 @@ def detect_layers(nodes: List[dict]) -> List[dict]:
     for node in nodes:
         fp = node.get("file_path", "").lower()
         name = node.get("name", "").lower()
+        parts = set(fp.split("/"))
         assigned = False
         for lid, _, keywords in LAYER_RULES:
-            if any(kw in fp.split("/") or kw in name for kw in keywords):
+            if any(kw in parts for kw in keywords):
                 layers[lid].node_ids.append(node["id"]); assigned = True; break
         if not assigned:
             lang = node.get("language", "")
-            if lang in ("markdown","html"): layers["docs"].node_ids.append(node["id"])
-            elif lang in ("json","yaml","toml","dockerfile","terraform"): layers["infra"].node_ids.append(node["id"])
+            if lang == "markdown": layers["docs"].node_ids.append(node["id"])
+            elif lang in ("json","yaml","toml","dockerfile","terraform","xml"): layers["infra"].node_ids.append(node["id"])
+            elif lang in ("html","css"): layers["ui"].node_ids.append(node["id"])
             else: layers["service"].node_ids.append(node["id"])
     return [asdict(l) for l in layers.values() if l.node_ids]

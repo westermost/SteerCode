@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from src import (
     scan_files, detect_language, build_graph, detect_layers,
     enrich_with_llm, generate_dashboard, generate_steering,
+    detect_versions,
     C, banner, phase_header, phase_done, table, summary_box, prompt,
     TOOL_NAMES,
 )
@@ -111,6 +112,18 @@ def _parse_args():
 def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     import time
     t0 = time.time()
+
+    # Auto-add output dir to .gitignore if git repo exists
+    gitignore = root / ".gitignore"
+    if (root / ".git").is_dir():
+        output_rel = str(output_dir.relative_to(root)) + "/" if output_dir.is_relative_to(root) else None
+        if output_rel:
+            existing = gitignore.read_text(errors="ignore") if gitignore.exists() else ""
+            if output_rel.rstrip("/") not in existing and output_rel not in existing:
+                with open(gitignore, "a") as f:
+                    if existing and not existing.endswith("\n"): f.write("\n")
+                    f.write(f"\n# SteerCode output\n{output_rel}\n")
+
     total_phases = 5 if use_llm else 4
     phase = 0
 
@@ -158,11 +171,19 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     print()
 
     # Assemble graph
+    # Detect versions
+    llm_ver_fn = None
+    if use_llm:
+        from src.llm import _llm_request
+        llm_ver_fn = lambda prompt: _llm_request(llm_url, args.model, prompt)
+    versions = detect_versions(root, llm_fn=llm_ver_fn)
+
     graph_data = {
         "version": "1.0.0",
         "project": {"name": root.name, "languages": list(lang_counts.keys()),
             "description": f"Knowledge graph for {root.name}",
-            "analyzedAt": datetime.now(timezone.utc).isoformat(), "llmEnriched": use_llm},
+            "analyzedAt": datetime.now(timezone.utc).isoformat(), "llmEnriched": use_llm,
+            "versions": versions},
         "nodes": result["nodes"], "edges": result["edges"], "layers": layer_data,
     }
 
