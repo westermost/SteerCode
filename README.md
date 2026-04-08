@@ -293,6 +293,8 @@ python steercode.py . --full   # Force full rebuild
 
 Impact analysis uses bounded BFS (depth=2) following `calls` and `imports` edges to find transitively affected nodes.
 
+When `--llm` is provided, incremental skip is bypassed to allow LLM enrichment on unchanged files. Batch cache ensures already-enriched batches are skipped automatically.
+
 ## Local LLM Support
 
 Optionally connect a local LLM for smart summaries (no cloud API needed):
@@ -322,11 +324,17 @@ Compatible with any OpenAI-compatible API: LM Studio, Ollama, LocalAI, vLLM, tex
 - Smart skip: test files, config files, vendored libraries
 - Priority: complex nodes first, simple last
 
+**Performance (large codebases):**
+- Semantic extraction runs once per file (not per function) — 20K files in ~3s
+- Fingerprints use size+mtime (no file reads) — 20K files in ~0.5s
+- Importance scoring uses O(N+E) adjacency map — 80K edges in ~0.2s
+- Scan progress throttled to avoid I/O bottleneck on Windows
+
 ## Tested On
 
 | Project | Language | Nodes | Edges | Layers | Chunks | Max Chunk | Versions |
 |---|---|---|---|---|---|---|---|
-| SteerCode | Python/JS | 169 | 200 | 4 | 3 | 2.4K tok | — |
+| SteerCode | Python/JS | 184 | 218 | 4 | 3 | 2.4K tok | — |
 | homes-pc | PHP/JS | 56,942 | 88,410 | 7 | 81 | 173K tok | PHP 5.6, Symfony 2.0.4 |
 | homes-sp | PHP/JS | 12,614 | 18,389 | 7 | 7 | 180K tok | PHP 7.2, Symfony 3.4.6 |
 | API-Server | Ruby | 50,468 | 62,111 | 7 | 76 | 151K tok | Ruby 2.5.9, Sinatra 2.0.0 |

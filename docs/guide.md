@@ -113,6 +113,8 @@ python steercode.py . --full   # Bắt buộc scan lại toàn bộ
 
 SteerCode lưu fingerprint (MD5) của mỗi file. Lần chạy sau so sánh → chỉ xử lý files thay đổi.
 
+Lưu ý: Nếu lần 1 chạy không LLM, lần 2 thêm `--llm` thì vẫn chạy bình thường (không bị skip). Batch cache sẽ tự skip các batches đã enrich rồi.
+
 ---
 
 ## Query Engine
@@ -256,6 +258,30 @@ SteerCode tự phân tích mỗi function/class (không cần LLM):
 | Windsurf | `.codemap-output/steering/.windsurfrules` | Copy về root |
 | Cline | `.codemap-output/steering/.clinerules` | Copy về root |
 | Codex | `.codemap-output/steering/AGENTS.md` | Copy về root |
+
+---
+
+## Hiệu năng (Performance)
+
+SteerCode được tối ưu cho codebase lớn (50K+ files):
+
+| Thao tác | Project nhỏ (100 files) | Project lớn (20K files) |
+|---|---|---|
+| Scan files | ~0.1s | ~2s |
+| Fingerprint | ~0.01s | ~0.5s |
+| Parse + build graph | ~0.5s | ~30s |
+| Semantic extraction | ~0.1s | ~3s |
+| Importance scoring | ~0.01s | ~0.2s |
+| LLM enrichment | ~2 min | ~30 min (concurrent) |
+| Incremental (no change) | instant | instant |
+
+Các tối ưu chính:
+- Semantic extraction chạy 1 lần per file (không per function)
+- Fingerprint dùng size+mtime (không đọc file content)
+- Importance scoring dùng adjacency map O(N+E)
+- Scan progress throttle mỗi 50 files (tránh I/O bottleneck)
+- LLM batch cache — lần chạy sau skip batches đã xong
+- Khi thêm `--llm` vào lần chạy sau, không bị skip bởi incremental
 
 ---
 

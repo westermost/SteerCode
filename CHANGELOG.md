@@ -2,6 +2,20 @@
 
 ## v1.0.0 — Code Intelligence Engine
 
+### Performance (critical fixes)
+- `compute_importance()`: O(N×E) → O(N+E) via adjacency map (20min → 0.2s for 80K edges)
+- Semantic extraction: per-function → per-file (267s → 3s for 20K functions)
+- Fingerprints: MD5 content hash → size+mtime stat (30s → 0.5s for 20K files)
+- Scan progress: throttled to every 50 files (avoid I/O bottleneck)
+- Force unbuffered stdout + Windows ANSI escape support
+- Speed display: `25s/batch` instead of `0.0/s` when rate < 1
+
+### Rich Auto-Summaries (no LLM)
+- Generate summaries from semantic info: `Function (userId, amount) · orchestrator · [payment] · → external_api:stripe`
+
+### Incremental Fix
+- Don't skip when `--llm` provided on unchanged files (allow LLM enrichment after non-LLM run)
+
 ### Query Engine
 - `steercode query find` — O(1) indexed lookup by domain, effect, role, type, name
 - `steercode query impact <name>` — bounded BFS impact analysis (depth=2)
