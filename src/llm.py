@@ -340,3 +340,141 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
         except Exception: pass
 
     return enriched
+
+
+# ─── Multi-Level Enrichment (v0.3) ──────────────────────────────────────────
+
+def enrich_files(nodes: List[dict], edges: List[dict], llm_url: str, model: str = "") -> Dict[str, dict]:
+    """Level 2: Aggregate function summaries → file summary with facts."""
+    from .graph import get_callees
+    file_nodes = {n["id"]: n for n in nodes if n["type"] == "file"}
+    func_nodes = {n["id"]: n for n in nodes if n["type"] in ("function", "class")}
+
+    # Map file → contained functions
+    file_children = defaultdict(list)
+    for e in edges:
+        if e["type"] == "contains" and e["source"] in file_nodes and e["target"] in func_nodes:
+            file_children[e["source"]].append(func_nodes[e["target"]])
+
+    results = {}
+    for fid, children in file_children.items():
+        fnode = file_nodes[fid]
+        if not any(c.get("summary", "").strip() and not c["summary"].startswith("Function") for c in children):
+            continue  # skip files without enriched summaries
+
+        # Aggregate facts from children
+        facts = _aggregate_facts(children)
+        child_summaries = "\n".join(
+            f"- {c['name']}: {c.get('summary', '')[:100]}" for c in children if c.get("summary"))
+
+        prompt = (
+            f"Summarize this file based on its functions/classes.\n\n"
+            f"File: {fnode['file_path']}\nContains:\n{child_summaries}\n\n"
+            f"You MUST preserve these facts:\n"
+            f"- external_apis: {facts.get('external_apis', [])}\n"
+            f"- db_tables: {facts.get('db_tables', [])}\n"
+            f"- domains: {facts.get('domains', [])}\n\n"
+            f'Return: {{"summary": "1-2 sentences", "facts": {{"external_apis": [...], "db_tables": [...], "domains": [...]}}}}'
+        )
+        try:
+            raw = _llm_request(llm_url, model, prompt)
+            result = _extract_json(raw)
+            if result:
+                summary = result.get("summary", "")
+                rfacts = result.get("facts", facts)
+                rfacts = _verify_facts(facts, rfacts)
+                results[fid] = {"summary": summary, "facts": rfacts}
+                fnode["summary"] = summary
+        except Exception:
+            pass
+    return results
+
+
+def enrich_modules(modules: Dict[str, List[dict]], file_summaries: Dict[str, dict],
+                   llm_url: str, model: str = "") -> Dict[str, dict]:
+    """Level 3: Aggregate file summaries → module summary with facts."""
+    results = {}
+    for mod_name, file_nodes in modules.items():
+        file_lines = []
+        all_facts = []
+        for fn in file_nodes:
+            fs = file_summaries.get(fn["id"], {})
+            s = fs.get("summary", fn.get("summary", ""))
+            if s and not s.startswith("python file") and not s.startswith("javascript file"):
+                file_lines.append(f"- {fn['file_path']}: {s[:100]}")
+            if fs.get("facts"): all_facts.append(fs["facts"])
+
+        if not file_lines: continue
+        merged = merge_facts(all_facts) if all_facts else {}
+
+        prompt = (
+            f"Summarize this module.\n\nModule: {mod_name}/\nFiles:\n" + "\n".join(file_lines) +
+            f"\n\nPreserve facts: {json.dumps(merged)}\n"
+            f'Return: {{"summary": "1-2 sentences", "facts": {{...}}}}'
+        )
+        try:
+            raw = _llm_request(llm_url, model, prompt)
+            result = _extract_json(raw)
+            if result:
+                results[mod_name] = {"summary": result.get("summary", ""), "facts": result.get("facts", merged)}
+        except Exception:
+            pass
+    return results
+
+
+# ─── Fact Helpers ────────────────────────────────────────────────────────────
+
+def _aggregate_facts(children: List[dict]) -> dict:
+    """Extract facts from semantic fields of child nodes."""
+    facts = {"external_apis": set(), "db_tables": set(), "domains": set(), "side_effects": set()}
+    for c in children:
+        sem = c.get("semantics", {})
+        for eff in sem.get("side_effects", []):
+            t = eff["type"] if isinstance(eff, dict) else eff
+            if ":" in t:
+                prefix, entity = t.split(":", 1)
+                if "api" in prefix: facts["external_apis"].add(entity)
+                elif "db" in prefix: facts["db_tables"].add(entity)
+                facts["side_effects"].add(prefix)
+            else:
+                facts["side_effects"].add(t)
+        if sem.get("domain_hint"): facts["domains"].add(sem["domain_hint"])
+    return {k: sorted(v) for k, v in facts.items() if v}
+
+
+def merge_facts(facts_list: List[dict]) -> dict:
+    """Merge multiple fact dicts, deduplicating."""
+    merged = defaultdict(set)
+    for facts in facts_list:
+        for key, values in facts.items():
+            if isinstance(values, list):
+                merged[key].update(values)
+            elif isinstance(values, str):
+                merged[key].add(values)
+    return {k: sorted(v) for k, v in merged.items() if v}
+
+
+def _verify_facts(original: dict, summary_facts: dict) -> dict:
+    """Ensure LLM didn't drop critical facts."""
+    for key in original:
+        orig = set(original[key]) if isinstance(original[key], list) else {original[key]}
+        summ = set(summary_facts.get(key, []))
+        lost = orig - summ
+        if lost:
+            summary_facts.setdefault(key, [])
+            if isinstance(summary_facts[key], list):
+                summary_facts[key].extend(sorted(lost))
+            else:
+                summary_facts[key] = sorted(orig | summ)
+    return summary_facts
+
+
+def detect_modules(nodes: List[dict]) -> Dict[str, List[dict]]:
+    """Group file nodes by top-level directory."""
+    modules = defaultdict(list)
+    for n in nodes:
+        if n["type"] != "file": continue
+        parts = n.get("file_path", "").split("/")
+        module = parts[0] if len(parts) > 1 else "root"
+        modules[module].append(n)
+    return dict(modules)
