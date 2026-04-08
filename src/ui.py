@@ -77,8 +77,11 @@ class ETATracker:
 
     def speed_str(self, current: int) -> str:
         elapsed = _time.monotonic() - self._start
-        if elapsed < 1: return ""
-        return f"{current / elapsed:.1f}/s"
+        if elapsed < 1 or current == 0: return ""
+        rate = current / elapsed
+        if rate >= 1:
+            return f"{rate:.1f}/s"
+        return f"{elapsed / current:.0f}s/batch"
 
     @staticmethod
     def _fmt(secs: float) -> str:
