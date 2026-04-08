@@ -233,7 +233,75 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
         webbrowser.open(f"file://{dash_path}")
 
 
+# ─── Query Command ────────────────────────────────────────────────────────────
+
+def _run_query(args):
+    """Handle: steercode query <command> [args]"""
+    from src.query import GraphQuery
+    import json as _json
+
+    graph_path = Path(".codemap-output/knowledge-graph.json")
+    if not graph_path.exists():
+        print(f"{C.RED}  ✗ No knowledge graph found. Run 'python steercode.py .' first.{C.RST}")
+        sys.exit(1)
+
+    q = GraphQuery(str(graph_path))
+
+    if not args:
+        print(f"  {C.WHITE}Usage:{C.RST}")
+        print(f"    steercode query find [--type T] [--domain D] [--effect E] [--name N]")
+        print(f"    steercode query impact <function_name>")
+        print(f"    steercode query flow <from> <to>")
+        print(f"    steercode query explain <function_name>")
+        return
+
+    cmd = args[0]
+
+    if cmd == "find":
+        kwargs = {}
+        i = 1
+        while i < len(args):
+            if args[i] == "--type" and i + 1 < len(args): kwargs["node_type"] = args[i+1]; i += 2
+            elif args[i] == "--domain" and i + 1 < len(args): kwargs["domain"] = args[i+1]; i += 2
+            elif args[i] == "--effect" and i + 1 < len(args): kwargs["effect"] = args[i+1]; i += 2
+            elif args[i] == "--name" and i + 1 < len(args): kwargs["name"] = args[i+1]; i += 2
+            else: i += 1
+        results = q.find(**kwargs)
+        for n in results:
+            eff = f" effects={n.get('effects')}" if n.get("effects") else ""
+            dom = f" domain={n.get('domain')}" if n.get("domain") else ""
+            print(f"  {C.BGREEN}{n['name']}{C.RST} ({n['type']}) in {n.get('file_path','')}{dom}{eff}")
+        print(f"\n  {C.DIM}{len(results)} results{C.RST}")
+
+    elif cmd == "impact" and len(args) > 1:
+        results = q.impact(args[1])
+        for n in results:
+            print(f"  {C.BGREEN}{n['name']}{C.RST} ({n['type']}) in {n.get('file_path','')}")
+        print(f"\n  {C.DIM}{len(results)} impacted nodes{C.RST}")
+
+    elif cmd == "flow" and len(args) > 2:
+        path = q.flow(args[1], args[2])
+        if path:
+            print(f"  {' → '.join(C.BGREEN + n['name'] + C.RST for n in path)}")
+        else:
+            print(f"  {C.YELLOW}No path found{C.RST}")
+
+    elif cmd == "explain" and len(args) > 1:
+        info = q.explain(args[1])
+        if info:
+            print(_json.dumps(info, indent=2))
+        else:
+            print(f"  {C.YELLOW}Node not found: {args[1]}{C.RST}")
+
+    else:
+        print(f"  {C.YELLOW}Unknown query command: {cmd}{C.RST}")
+
+
 def main():
+    if len(sys.argv) >= 2 and sys.argv[1] == "query":
+        _run_query(sys.argv[2:])
+        return
+
     if len(sys.argv) == 1:
         cfg = interactive_setup()
         class Args: pass
