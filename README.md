@@ -21,6 +21,16 @@ python steercode.py . --tools kiro,cursor
 
 # Interactive mode (guided wizard)
 python steercode.py
+
+# Query the knowledge graph
+python steercode.py query find --effect external_api
+python steercode.py query impact processPayment
+python steercode.py query explain _llm_request
+
+# Incremental (only re-analyze changed files)
+python steercode.py .              # first run: full scan
+python steercode.py .              # second run: skips unchanged files
+python steercode.py . --full       # force full rebuild
 ```
 
 ## What It Does
@@ -52,6 +62,9 @@ Codebase → Scan → Parse → Semantic Analysis → Knowledge Graph → Dashbo
   knowledge-graph.json         # Full graph (nodes, edges, layers)
   knowledge-graph.compact.json # Columnar format for AI (smaller)
   graph-index.json             # Layer index — AI reads this first
+  fingerprints.json            # File hashes for incremental updates
+  metrics.json                 # LLM enrichment metrics (if --llm used)
+  cache/                       # Batch cache for idempotent LLM re-runs
   layers/                      # Per-layer chunks for progressive loading
     service_1.json             #   AI loads only what it needs
     data_1.json
@@ -220,6 +233,66 @@ Every function and class is analyzed for semantic signals — no LLM required:
 
 Side effects include confidence scores and source tagging (`regex` vs `import_inference`), with entity-level granularity (e.g. `external_api:stripe` not just `external_api`).
 
+## Query Engine (v1.0)
+
+Query the knowledge graph from CLI or programmatically:
+
+```bash
+# Find functions by side effect
+python steercode.py query find --effect external_api
+
+# Find by business domain
+python steercode.py query find --domain payment
+
+# Impact analysis: what breaks if I change this?
+python steercode.py query impact processPayment
+
+# Trace execution flow between two functions
+python steercode.py query flow CartController processPayment
+
+# Full context for a function
+python steercode.py query explain _llm_request
+```
+
+All queries use O(1) indexed lookups (domain, effect, role, type).
+
+## MCP Server
+
+Expose the query engine to any MCP-compatible AI tool:
+
+```bash
+# Start MCP server (stdio transport)
+python -m src.mcp_server
+```
+
+Add to your AI tool's MCP config:
+```json
+{
+  "mcpServers": {
+    "steercode": {
+      "command": "python",
+      "args": ["-m", "src.mcp_server"],
+      "cwd": "/path/to/your/project"
+    }
+  }
+}
+```
+
+Available tools: `steercode_find`, `steercode_impact`, `steercode_flow`, `steercode_explain`
+
+## Incremental Updates (v0.4)
+
+SteerCode fingerprints every file. On re-run, only changed files are re-processed:
+
+```bash
+python steercode.py .          # Run 1: full scan, saves fingerprints
+# ... edit some files ...
+python steercode.py .          # Run 2: detects changes, skips unchanged
+python steercode.py . --full   # Force full rebuild
+```
+
+Impact analysis uses bounded BFS (depth=2) following `calls` and `imports` edges to find transitively affected nodes.
+
 ## Local LLM Support
 
 Optionally connect a local LLM for smart summaries (no cloud API needed):
@@ -253,7 +326,7 @@ Compatible with any OpenAI-compatible API: LM Studio, Ollama, LocalAI, vLLM, tex
 
 | Project | Language | Nodes | Edges | Layers | Chunks | Max Chunk | Versions |
 |---|---|---|---|---|---|---|---|
-| SteerCode | Python/JS | 133 | 155 | 3 | 3 | 2.4K tok | — |
+| SteerCode | Python/JS | 169 | 200 | 4 | 3 | 2.4K tok | — |
 | homes-pc | PHP/JS | 56,942 | 88,410 | 7 | 81 | 173K tok | PHP 5.6, Symfony 2.0.4 |
 | homes-sp | PHP/JS | 12,614 | 18,389 | 7 | 7 | 180K tok | PHP 7.2, Symfony 3.4.6 |
 | API-Server | Ruby | 50,468 | 62,111 | 7 | 76 | 151K tok | Ruby 2.5.9, Sinatra 2.0.0 |
@@ -264,13 +337,15 @@ All projects: max chunk < 200K tokens, fits 1M context window.
 ## Project Structure
 
 ```
-steercode.py                  # CLI entry point
+steercode.py                  # CLI entry point + query command
 src/
 ├── __init__.py               # Public API
-├── types.py                  # Data classes (GraphNode, GraphEdge, Layer)
-├── scanner.py                # File scanning & .gitignore
-├── graph.py                  # Knowledge graph builder + layer detection
-├── llm.py                    # LLM enrichment (retry, concurrent, ETA)
+├── types.py                  # Data classes (GraphNode, GraphEdge, Layer, SemanticInfo)
+├── scanner.py                # File scanning, .gitignore, fingerprints
+├── graph.py                  # Knowledge graph builder, layers, importance, BFS impact
+├── llm.py                    # LLM enrichment (structured batch, concurrent, 3-level)
+├── query.py                  # Query engine (find, impact, flow, explain)
+├── mcp_server.py             # MCP server (stdio JSON-RPC)
 ├── versions.py               # Version detection (monorepo support)
 ├── ui.py                     # Terminal UI + ETATracker
 ├── complexity/               # Complexity analysis engine
@@ -301,6 +376,11 @@ dashboard/
 ├── style.css                 # Styles
 ├── app.js                    # Dashboard logic
 └── i18n.js                   # Translations (EN, KO, ZH, JA, ES)
+tests/
+└── eval.py                   # Golden test evaluation framework
+docs/
+├── optimization-plan.md      # Architecture design document
+└── tasks.md                  # Implementation task list
 ```
 
 ## Contributing
@@ -334,8 +414,9 @@ SteerCode gives them a map:
 
 ```
 python steercode.py [path] [options]
+python steercode.py query <command> [args]
 
-Options:
+Scan options:
   -o, --output DIR       Output directory (default: .codemap-output)
   --llm URL              Local LLM URL for smart summaries
   --model NAME           Model name (optional)
@@ -344,6 +425,13 @@ Options:
   --tools LIST           Comma-separated AI tools (kiro,cursor,copilot,claude,windsurf,cline,codex)
   --no-open              Don't open dashboard in browser
   --json-only            Only output JSON, skip dashboard
+  --full                 Force full rebuild (ignore fingerprints)
+
+Query commands:
+  query find [--type T] [--domain D] [--effect E] [--name N]
+  query impact <function_name>
+  query flow <from_function> <to_function>
+  query explain <function_name>
 ```
 
 ## License
