@@ -67,8 +67,11 @@ def classify_error(e: Exception) -> str:
 
 # ─── Batch Cache (Idempotency) ───────────────────────────────────────────────
 
-def _batch_id(items: list) -> str:
-    content = json.dumps([(n["id"], n["name"]) for n in items], sort_keys=True)
+def _batch_id(items: list, content_tokens: Optional[List[str]] = None) -> str:
+    content = json.dumps({
+        "nodes": [(n["id"], n["name"]) for n in items],
+        "content_tokens": content_tokens or [],
+    }, sort_keys=True)
     return hashlib.md5(content.encode()).hexdigest()[:12]
 
 def _get_cached(cache_dir: Optional[Path], bid: str) -> Optional[dict]:
@@ -148,24 +151,39 @@ def _build_func_block(node: dict, snippet: str, idx: int) -> str:
 def _build_batch_prompt(batch_nodes: List[dict], file_contents: Dict[str, list],
                         max_code_chars: int, edges: List[dict] = None,
                         node_by_id: Dict[str, dict] = None,
-                        importance: Dict[str, float] = None) -> Tuple[str, List[str], Dict[str, str]]:
-    """Build structured prompt for a batch. Returns (prompt, expected_ids, id_to_node_id)."""
+                        importance: Dict[str, float] = None) -> Tuple[str, List[str], Dict[str, str], List[dict], List[dict], List[str]]:
+    """Build structured prompt for a batch.
+
+    Returns (prompt, expected_ids, id_to_node_id, included_nodes, remaining_nodes, content_tokens).
+    """
     blocks = []
     expected_ids = []
     id_map = {}  # fN → node["id"]
     total_chars = 0
+    included_nodes = []
+    remaining_nodes = []
+    content_tokens = []
+    overflow_started = False
 
-    for i, n in enumerate(batch_nodes):
+    for n in batch_nodes:
+        if overflow_started:
+            remaining_nodes.append(n)
+            continue
         lines = file_contents.get(n["file_path"])
-        if lines is None: continue
+        if lines is None:
+            continue
         s, e = max(0, n["line_range"][0] - 2), min(len(lines), n["line_range"][1] + 1)
         snippet = "\n".join(lines[s:e])
         if len(snippet) > 3000: snippet = snippet[:3000] + "\n..."
-        if total_chars + len(snippet) > max_code_chars and blocks: break
+        if total_chars + len(snippet) > max_code_chars and blocks:
+            overflow_started = True
+            remaining_nodes.append(n)
+            continue
         total_chars += len(snippet)
 
-        fid = f"f{i}"
-        block = _build_func_block(n, snippet, i)
+        idx = len(included_nodes)
+        fid = f"f{idx}"
+        block = _build_func_block(n, snippet, idx)
         # Inject context if available
         if edges and node_by_id and importance:
             ctx = _select_context(n, edges, node_by_id, importance)
@@ -173,13 +191,15 @@ def _build_batch_prompt(batch_nodes: List[dict], file_contents: Dict[str, list],
         blocks.append(block)
         expected_ids.append(fid)
         id_map[fid] = n["id"]
+        included_nodes.append(n)
+        content_tokens.append(f'{n["id"]}:{hashlib.md5(snippet.encode()).hexdigest()[:10]}')
 
     prompt = (
         "Analyze these functions. Each has an ID. Return a JSON object keyed by ID with 1-2 sentence summaries.\n\n"
         + "\n\n".join(blocks)
         + f'\n\nReturn ONLY: {{"f0": "summary...", "f1": "summary...", ...}}'
     )
-    return prompt, expected_ids, id_map
+    return prompt, expected_ids, id_map, included_nodes, remaining_nodes, content_tokens
 
 # ─── Validation + Retry ─────────────────────────────────────────────────────
 
@@ -280,30 +300,51 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
 
     def _process_one(idx_batch):
         idx, batch = idx_batch
-        bid = _batch_id(batch)
-        cached = _get_cached(cache_dir, bid)
-        if cached:
-            return idx, bid, cached, None, "cached", 0
+        pending = list(batch)
+        combined_result = {}
+        combined_missing = set()
+        latency = 0.0
+        status = "success"
+        bids = []
 
-        t0 = time.time()
-        prompt, expected_ids, id_map = _build_batch_prompt(batch, file_contents, max_code_chars,
-                                                            edges, node_by_id, importance)
-        raw = _llm_request(llm_url, model, prompt)
-        result = _extract_json(raw)
-        result = _validate_and_retry(result, expected_ids, llm_url, model, prompt)
-        latency = time.time() - t0
+        while pending:
+            prompt, expected_ids, id_map, included_nodes, remaining_nodes, content_tokens = _build_batch_prompt(
+                pending, file_contents, max_code_chars, edges, node_by_id, importance
+            )
+            if not included_nodes:
+                break
 
-        cache_result = {}
-        if result:
-            for fid, summary in result.items():
-                nid = id_map.get(fid)
-                if nid and isinstance(summary, str):
-                    cache_result[nid] = summary
-            _save_cache(cache_dir, bid, cache_result)
+            bid = _batch_id(included_nodes, content_tokens)
+            bids.append(bid)
+            cached = _get_cached(cache_dir, bid)
+            if cached:
+                combined_result.update(cached)
+                pending = remaining_nodes
+                continue
 
-        missing = set(expected_ids) - set(result.keys()) if result else set(expected_ids)
-        status = "success" if not missing else "partial"
-        return idx, bid, cache_result, missing, status, latency
+            t0 = time.time()
+            raw = _llm_request(llm_url, model, prompt)
+            result = _extract_json(raw)
+            result = _validate_and_retry(result, expected_ids, llm_url, model, prompt)
+            latency += time.time() - t0
+
+            cache_result = {}
+            if result:
+                for fid, summary in result.items():
+                    nid = id_map.get(fid)
+                    if nid and isinstance(summary, str):
+                        cache_result[nid] = summary
+                _save_cache(cache_dir, bid, cache_result)
+
+            combined_result.update(cache_result)
+            missing = set(expected_ids) - set(result.keys()) if result else set(expected_ids)
+            if missing:
+                combined_missing.update(missing)
+                status = "partial"
+            pending = remaining_nodes
+
+        joined_bid = ",".join(bids) if bids else _batch_id(batch)
+        return idx, joined_bid, combined_result, combined_missing, status, latency
 
     max_workers = min(3, max(1, len(batches) // 2))
 
