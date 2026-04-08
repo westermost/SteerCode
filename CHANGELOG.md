@@ -1,0 +1,90 @@
+# Changelog
+
+## v1.0.0 — Code Intelligence Engine
+
+### Query Engine
+- `steercode query find` — O(1) indexed lookup by domain, effect, role, type, name
+- `steercode query impact <name>` — bounded BFS impact analysis (depth=2)
+- `steercode query flow <from> <to>` — shortest execution path via BFS
+- `steercode query explain <name>` — full context: summary, callers, callees, effects
+
+### MCP Server
+- `src/mcp_server.py` — stdio JSON-RPC 2.0 transport
+- 4 tools: `steercode_find`, `steercode_impact`, `steercode_flow`, `steercode_explain`
+- Compatible with Kiro, Cursor, Claude Code, and any MCP client
+
+## v0.4.0 — Production Ready
+
+### Concurrent Enrichment
+- ThreadPoolExecutor with max_workers=3, thread-safe progress bar
+- Sequential retry with backoff for failed batches
+
+### Incremental Updates
+- File fingerprinting (MD5) saved to `fingerprints.json`
+- `--full` flag to force rebuild
+- Bounded BFS impact expansion (follows `calls`/`imports`, max depth=2)
+- `merge_graphs()` for incremental graph updates
+
+### Evaluation
+- `tests/eval.py` with golden test framework (5 tests, baseline: 0.95)
+
+## v0.3.0 — Graph Compression
+
+### 3-Level Summaries
+- `enrich_files()` — function summaries → file summary
+- `enrich_modules()` — file summaries → module summary
+- `detect_modules()` — group files by top-level directory
+
+### Fact Anchoring
+- Prompt forces LLM to preserve `external_apis`, `db_tables`, `domains`
+- `merge_facts()` — deduplicate across levels
+- `_verify_facts()` — loss check, force-merge dropped facts
+
+## v0.2.0 — Smart Analysis
+
+### Semantic Extraction
+- `SideEffect` with confidence + source tagging (`regex`/`import_inference`)
+- 5 side effect detectors: db_write, db_read, external_api, file_io, state_mutate
+- 7 business domains, 5 execution roles, 4 control flow types
+- Entity extraction + normalization (`StripeGateway` → `stripe`)
+
+### Structured Batch
+- `<FUNC id="fN">` prompt format with semantic metadata
+- Batch by file (10-20 files/batch)
+- `validate_and_retry()` for missing IDs
+
+### Deep Context
+- Caller/callee injection sorted by importance
+- `compute_importance()` with decay + percentile normalization
+
+### Reliability & Observability
+- `classify_error()` — timeout, rate_limit, auth
+- Batch cache for idempotent re-runs
+- Per-batch metrics saved to `metrics.json`
+
+## v0.1.1
+
+### Bug Fixes
+- Simplify LLM enrichment process by removing concurrency and enhancing error handling
+
+## v0.1.0
+
+### Features
+- Optimize Go module detection and update Docker base image key
+- Correct regex patterns for JavaScript and TypeScript branch detection
+- Enhance LLM integration and version detection
+- Refactor graph building and parsing logic
+- Add output generation for dashboard and steering files
+
+### Initial (v0.0.1)
+- Core file scanner (20+ languages, .gitignore support)
+- Multi-language parser (Python AST + regex for 14 languages)
+- Knowledge graph builder with cross-reference calls
+- Architectural layer detection (7 layers)
+- Complexity analysis (cyclomatic + cognitive + 11 framework rules)
+- Version detection (PHP, Node, Python, Go, Ruby, Docker)
+- Interactive HTML dashboard (vis-network, 5 languages)
+- Progressive disclosure — per-layer chunks
+- Steering files for 7 AI tools
+- Matrix hacker green terminal theme
+- Interactive wizard + settings persistence
