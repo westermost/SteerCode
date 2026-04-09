@@ -31,6 +31,26 @@ python steercode.py query explain _llm_request
 python steercode.py .              # first run: full scan
 python steercode.py .              # second run: skips unchanged files
 python steercode.py . --full       # force full rebuild
+
+# Diff impact analysis
+python steercode.py diff
+python steercode.py diff HEAD~3
+
+# Generate onboarding guide
+python steercode.py onboard
+
+# Deep-dive into a function
+python steercode.py explain processPayment
+
+# Chat about codebase (needs LLM)
+python steercode.py chat --llm http://localhost:1234 "how does auth work?"
+
+# Extract business domains
+python steercode.py domain
+
+# Guided learning tour
+python steercode.py tour
+python steercode.py tour --focus payment
 ```
 
 ## What It Does
@@ -354,6 +374,11 @@ src/
 ├── llm.py                    # LLM enrichment (structured batch, concurrent, 3-level)
 ├── query.py                  # Query engine (find, impact, flow, explain)
 ├── mcp_server.py             # MCP server (stdio JSON-RPC)
+├── diff.py                   # Diff impact analysis
+├── onboard.py                # Onboarding guide generator
+├── chat.py                   # Interactive Q&A with LLM
+├── domain.py                 # Business domain extraction
+├── tour.py                   # Guided learning tour
 ├── versions.py               # Version detection (monorepo support)
 ├── ui.py                     # Terminal UI + ETATracker
 ├── complexity/               # Complexity analysis engine
@@ -480,6 +505,14 @@ Query commands:
   query impact <function_name>
   query flow <from_function> <to_function>
   query explain <function_name>
+
+Commands:
+  diff [ref]                     Impact analysis on git changes
+  onboard                        Generate docs/ONBOARDING.md
+  explain <name>                 Deep-dive with source code
+  chat --llm URL [question]      Interactive Q&A (needs LLM)
+  domain [--llm URL]             Extract business domains
+  tour [--focus domain]          Guided learning path
 ```
 
 ## License

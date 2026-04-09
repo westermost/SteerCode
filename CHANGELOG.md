@@ -1,5 +1,35 @@
 # Changelog
 
+## v1.1.0 — 6 New Commands
+
+### Diff Analysis
+- `steercode diff [ref]` — map git changes to knowledge graph
+- 1-hop impact expansion via calls/imports edges
+- Risk scoring: HIGH (orchestrator/external_api), MEDIUM (data_access/db_write), LOW
+
+### Onboarding Guide
+- `steercode onboard` — generate docs/ONBOARDING.md
+- Overview table, architecture layers, key components, complexity hotspots, reading order
+
+### Explain with Source
+- `steercode explain <name>` — deep-dive with source code + line numbers
+- Shows metadata, callers, callees, and actual source code
+
+### Chat Mode
+- `steercode chat --llm URL [question]` — interactive Q&A about codebase
+- Searches graph by keywords, expands 1-hop, sends context to LLM
+- Single question or interactive REPL mode
+
+### Domain Extraction
+- `steercode domain [--llm URL]` — extract business domains and flows
+- Groups nodes by domain_hint, traces call chains from entry points
+- Saves domain-graph.json
+
+### Guided Tours
+- `steercode tour [--focus domain]` — learning path ordered by dependency
+- Topological sort by layer (Data → Service → API → UI)
+- Group by directory, highlight key files
+
 ## v1.0.0 — Code Intelligence Engine
 
 ### Performance (critical fixes)

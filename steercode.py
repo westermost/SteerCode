@@ -318,9 +318,167 @@ def _run_query(args):
         print(f"  {C.YELLOW}Unknown query command: {cmd}{C.RST}")
 
 
+def _run_tour(args):
+    """Handle: steercode tour [--focus domain]"""
+    import json as _json
+    from src.tour import generate_tour, format_tour
+    graph_path = Path(".codemap-output/knowledge-graph.json")
+    if not graph_path.exists():
+        print(f"{C.RED}  ✗ No knowledge graph. Run 'python steercode.py .' first.{C.RST}"); sys.exit(1)
+    focus = None
+    if args and args[0] == "--focus" and len(args) > 1: focus = args[1]
+    graph_data = _json.loads(graph_path.read_text())
+    stops = generate_tour(graph_data, focus)
+    print(format_tour(stops, graph_data["project"]["name"]))
+
+
+def _run_domain(args):
+    """Handle: steercode domain [--llm URL]"""
+    import json as _json
+    from src.domain import extract_domains, format_domains
+    graph_path = Path(".codemap-output/knowledge-graph.json")
+    if not graph_path.exists():
+        print(f"{C.RED}  ✗ No knowledge graph. Run 'python steercode.py .' first.{C.RST}"); sys.exit(1)
+    llm_url, model = "", ""
+    i = 0
+    while i < len(args):
+        if args[i] == "--llm" and i + 1 < len(args): llm_url = args[i+1]; i += 2
+        elif args[i] == "--model" and i + 1 < len(args): model = args[i+1]; i += 2
+        else: i += 1
+    graph_data = _json.loads(graph_path.read_text())
+    result = extract_domains(graph_data, llm_url, model)
+    print(format_domains(result))
+    # Save
+    out = Path(".codemap-output/domain-graph.json")
+    out.write_text(_json.dumps(result, indent=2, ensure_ascii=False))
+    print(f"\n  {C.BGREEN}✓{C.RST} {C.GREEN}Saved to {out}{C.RST}")
+
+
+def _run_chat(args):
+    """Handle: steercode chat --llm URL [question]"""
+    llm_url = ""
+    model = ""
+    question = None
+    i = 0
+    while i < len(args):
+        if args[i] == "--llm" and i + 1 < len(args): llm_url = args[i+1]; i += 2
+        elif args[i] == "--model" and i + 1 < len(args): model = args[i+1]; i += 2
+        else: question = " ".join(args[i:]); break
+    if not llm_url:
+        saved = load_config()
+        llm_url = saved.get("llm_url", "")
+    if not llm_url:
+        print(f"  {C.RED}✗ Chat requires LLM. Use: steercode chat --llm URL \"question\"{C.RST}"); return
+    graph_path = Path(".codemap-output/knowledge-graph.json")
+    if not graph_path.exists():
+        print(f"{C.RED}  ✗ No knowledge graph. Run 'python steercode.py .' first.{C.RST}"); sys.exit(1)
+    from src.chat import ChatSession
+    session = ChatSession(str(graph_path), llm_url, model)
+    if question:
+        answer = session.ask(question)
+        print(f"\n  {answer}\n")
+        return
+    # Interactive REPL
+    print(f"  {C.BGREEN}SteerCode Chat{C.RST} {C.DIM}(type 'exit' to quit){C.RST}\n")
+    while True:
+        try:
+            q = input(f"  {C.BGREEN}>{C.RST} ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print(); break
+        if not q or q.lower() in ("exit", "quit"): break
+        print(f"  {C.DIM}Thinking...{C.RST}")
+        answer = session.ask(q)
+        print(f"\n  {answer}\n")
+
+
+def _run_explain(args):
+    """Handle: steercode explain <name>"""
+    if not args:
+        print(f"  Usage: steercode explain <function_or_class_name>"); return
+    from src.query import GraphQuery
+    graph_path = Path(".codemap-output/knowledge-graph.json")
+    if not graph_path.exists():
+        print(f"{C.RED}  ✗ No knowledge graph. Run 'python steercode.py .' first.{C.RST}"); sys.exit(1)
+    q = GraphQuery(str(graph_path))
+    info = q.explain(args[0], root=Path("."))
+    if not info:
+        print(f"  {C.YELLOW}Node not found: {args[0]}{C.RST}"); return
+    # Format
+    print(f"\n  {C.BGREEN}{'═' * 50}{C.RST}")
+    print(f"  {C.WHITE}{C.BOLD}{info['name']}{C.RST}")
+    print(f"  {C.DIM}File: {info['file']}  Lines: {info.get('line_range', '')}{C.RST}")
+    meta = []
+    if info.get("type"): meta.append(info["type"])
+    if info.get("complexity"): meta.append(info["complexity"])
+    if info.get("domain"): meta.append(f"[{info['domain']}]")
+    if info.get("role"): meta.append(info["role"])
+    if meta: print(f"  {C.GREEN}{' · '.join(meta)}{C.RST}")
+    if info.get("effects"): print(f"  {C.GREEN}Effects: {', '.join(info['effects'])}{C.RST}")
+    if info.get("summary"): print(f"\n  {info['summary']}")
+    if info.get("callers"):
+        print(f"\n  {C.WHITE}Called by:{C.RST}")
+        for c in info["callers"][:10]: print(f"    → {C.GREEN}{c}{C.RST}")
+    if info.get("callees"):
+        print(f"\n  {C.WHITE}Calls:{C.RST}")
+        for c in info["callees"][:10]: print(f"    → {C.GREEN}{c}{C.RST}")
+    if info.get("source"):
+        print(f"\n  {C.WHITE}Source:{C.RST}")
+        for num, line in info["source"][:30]:
+            print(f"  {C.DIM}{num:4d}{C.RST} │ {line}")
+        if len(info["source"]) > 30:
+            print(f"  {C.DIM}     ... ({len(info['source']) - 30} more lines){C.RST}")
+    print()
+
+
+def _run_onboard():
+    """Handle: steercode onboard"""
+    import json as _json
+    from src.onboard import generate_onboard
+    graph_path = Path(".codemap-output/knowledge-graph.json")
+    if not graph_path.exists():
+        print(f"{C.RED}  ✗ No knowledge graph. Run 'python steercode.py .' first.{C.RST}"); sys.exit(1)
+    graph_data = _json.loads(graph_path.read_text())
+    out = generate_onboard(graph_data, Path("."))
+    print(f"  {C.BGREEN}✓{C.RST} {C.GREEN}Onboarding guide saved to {out}{C.RST}")
+
+
+def _run_diff(args):
+    """Handle: steercode diff [ref]"""
+    import json as _json
+    from src.diff import get_changed_files, analyze_diff, format_diff
+    graph_path = Path(".codemap-output/knowledge-graph.json")
+    if not graph_path.exists():
+        print(f"{C.RED}  ✗ No knowledge graph. Run 'python steercode.py .' first.{C.RST}"); sys.exit(1)
+    graph_data = _json.loads(graph_path.read_text())
+    ref = args[0] if args else None
+    changed = get_changed_files(Path("."), ref)
+    if not changed:
+        print(f"  {C.GREEN}No changes detected.{C.RST}"); return
+    result = analyze_diff(graph_data, changed)
+    print(format_diff(result))
+
+
 def main():
     if len(sys.argv) >= 2 and sys.argv[1] == "query":
         _run_query(sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "diff":
+        _run_diff(sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "onboard":
+        _run_onboard()
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "explain":
+        _run_explain(sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "chat":
+        _run_chat(sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "domain":
+        _run_domain(sys.argv[2:])
+        return
+    if len(sys.argv) >= 2 and sys.argv[1] == "tour":
+        _run_tour(sys.argv[2:])
         return
 
     if len(sys.argv) == 1:
