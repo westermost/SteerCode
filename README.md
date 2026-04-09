@@ -418,6 +418,46 @@ SteerCode gives them a map:
 - No external dependencies (stdlib only)
 - Optional: local LLM for smart summaries
 
+## Configuration
+
+Drop `steercode.config.json` in your project root to tune for your machine:
+
+```json
+{
+  "llm": {
+    "timeout": 600,
+    "max_retries": 3,
+    "max_workers": 1,
+    "max_code_chars": 15000,
+    "files_per_batch": 5,
+    "nodes_per_batch": 10,
+    "snippet_max_chars": 3000,
+    "top_k_callers": 2,
+    "top_k_callees": 3
+  },
+  "scan": {
+    "max_file_size_kb": 512,
+    "progress_throttle": 50
+  }
+}
+```
+
+Only include the values you want to change — defaults are used for the rest.
+
+| Setting | Default | Description |
+|---|---|---|
+| `llm.timeout` | 300 | Seconds before LLM request times out |
+| `llm.max_retries` | 3 | Retry count per failed request |
+| `llm.max_workers` | 3 | Concurrent LLM batches (reduce for weak GPU) |
+| `llm.files_per_batch` | 15 | Max files grouped per LLM batch |
+| `llm.nodes_per_batch` | 30 | Max functions/classes per batch |
+| `llm.max_code_chars` | 15000 | Token budget per batch (chars) |
+| `llm.snippet_max_chars` | 3000 | Max chars per code snippet |
+| `llm.top_k_callers` | 2 | Callers injected as context |
+| `llm.top_k_callees` | 3 | Callees injected as context |
+| `scan.max_file_size_kb` | 512 | Skip files larger than this |
+| `scan.progress_throttle` | 50 | Update scan counter every N files |
+
 ## CLI Options
 
 ```
