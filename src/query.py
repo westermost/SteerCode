@@ -82,8 +82,8 @@ class GraphQuery:
                     queue.append((nb, path + [nb]))
         return []
 
-    def explain(self, node_name: str) -> Optional[dict]:
-        """Full context for a node."""
+    def explain(self, node_name: str, root: Path = None) -> Optional[dict]:
+        """Full context for a node, including source code."""
         nid = self._by_name.get(node_name)
         if not nid or nid not in self.nodes: return None
         n = self.nodes[nid]
@@ -91,10 +91,23 @@ class GraphQuery:
                    if e["target"] == nid and e["type"] == "calls" and e["source"] in self.nodes]
         callees = [self.nodes[e["target"]]["name"] for e in self.edges
                    if e["source"] == nid and e["type"] == "calls" and e["target"] in self.nodes]
+        # Read source code
+        source_lines = []
+        if root and n.get("file_path"):
+            try:
+                fp = root / n["file_path"]
+                lines = fp.read_text(errors="ignore").splitlines()
+                lr = n.get("line_range", [0, 0])
+                if lr[0] > 0:
+                    s, e = max(0, lr[0] - 1), min(len(lines), lr[1])
+                    source_lines = [(lr[0] + i, lines[s + i]) for i in range(e - s)]
+            except Exception:
+                pass
         return {
             "name": n["name"], "type": n.get("type"), "file": n.get("file_path"),
-            "summary": n.get("summary", ""), "complexity": n.get("complexity"),
-            "domain": n.get("domain"), "role": n.get("role"),
-            "effects": n.get("effects", []), "importance": n.get("importance"),
-            "callers": callers, "callees": callees,
+            "line_range": n.get("line_range"), "summary": n.get("summary", ""),
+            "complexity": n.get("complexity"), "domain": n.get("domain"),
+            "role": n.get("role"), "effects": n.get("effects", []),
+            "control_flow": n.get("control_flow", []), "importance": n.get("importance"),
+            "callers": callers, "callees": callees, "source": source_lines,
         }

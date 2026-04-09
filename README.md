@@ -31,6 +31,26 @@ python steercode.py query explain _llm_request
 python steercode.py .              # first run: full scan
 python steercode.py .              # second run: skips unchanged files
 python steercode.py . --full       # force full rebuild
+
+# Diff impact analysis
+python steercode.py diff
+python steercode.py diff HEAD~3
+
+# Generate onboarding guide
+python steercode.py onboard
+
+# Deep-dive into a function
+python steercode.py explain processPayment
+
+# Chat about codebase (needs LLM)
+python steercode.py chat --llm http://localhost:1234 "how does auth work?"
+
+# Extract business domains
+python steercode.py domain
+
+# Guided learning tour
+python steercode.py tour
+python steercode.py tour --focus payment
 ```
 
 ## What It Does
@@ -334,11 +354,11 @@ Compatible with any OpenAI-compatible API: LM Studio, Ollama, LocalAI, vLLM, tex
 
 | Project | Language | Nodes | Edges | Layers | Chunks | Max Chunk | Versions |
 |---|---|---|---|---|---|---|---|
-| SteerCode | Python/JS | 184 | 218 | 4 | 3 | 2.4K tok | — |
-| homes-pc | PHP/JS | 56,942 | 88,410 | 7 | 81 | 173K tok | PHP 5.6, Symfony 2.0.4 |
-| homes-sp | PHP/JS | 12,614 | 18,389 | 7 | 7 | 180K tok | PHP 7.2, Symfony 3.4.6 |
-| API-Server | Ruby | 50,468 | 62,111 | 7 | 76 | 151K tok | Ruby 2.5.9, Sinatra 2.0.0 |
-| v4-bunjou | PHP/JS | 9,312 | 14,687 | 6 | 9 | 35K tok | Legacy (no composer) |
+| SteerCode | Python/JS | 217 | 271 | 5 | 3 | 2.4K tok | — |
+| Project A | PHP/JS | 56,942 | 88,410 | 7 | 81 | 173K tok | PHP 5.6, Symfony 2.0.4 |
+| Project B | PHP/JS | 12,614 | 18,389 | 7 | 7 | 180K tok | PHP 7.2, Symfony 3.4.6 |
+| Project C | Ruby | 50,468 | 62,111 | 7 | 76 | 151K tok | Ruby 2.5.9, Sinatra 2.0.0 |
+| Project D | PHP/JS | 9,312 | 14,687 | 6 | 9 | 35K tok | Legacy (no composer) |
 
 All projects: max chunk < 200K tokens, fits 1M context window.
 
@@ -354,6 +374,11 @@ src/
 ├── llm.py                    # LLM enrichment (structured batch, concurrent, 3-level)
 ├── query.py                  # Query engine (find, impact, flow, explain)
 ├── mcp_server.py             # MCP server (stdio JSON-RPC)
+├── diff.py                   # Diff impact analysis
+├── onboard.py                # Onboarding guide generator
+├── chat.py                   # Interactive Q&A with LLM
+├── domain.py                 # Business domain extraction
+├── tour.py                   # Guided learning tour
 ├── versions.py               # Version detection (monorepo support)
 ├── ui.py                     # Terminal UI + ETATracker
 ├── complexity/               # Complexity analysis engine
@@ -480,6 +505,14 @@ Query commands:
   query impact <function_name>
   query flow <from_function> <to_function>
   query explain <function_name>
+
+Commands:
+  diff [ref]                     Impact analysis on git changes
+  onboard                        Generate docs/ONBOARDING.md
+  explain <name>                 Deep-dive with source code
+  chat --llm URL [question]      Interactive Q&A (needs LLM)
+  domain [--llm URL]             Extract business domains
+  tour [--focus domain]          Guided learning path
 ```
 
 ## License

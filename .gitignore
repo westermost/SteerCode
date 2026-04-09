@@ -1,8 +1,10 @@
 .codemap-output/
 __pycache__/
 *.pyc
-.kiro/
+.kiro/*
 .cursor/
 .agents/*
 docs/*
 skills-lock.json
+.cursor/*
+.github/*
