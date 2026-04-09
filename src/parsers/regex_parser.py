@@ -82,6 +82,15 @@ def parse_with_regex(content: str, lang: str) -> ParseResult:
     patterns = RE_PATTERNS.get(lang)
     if not patterns: return r
     lines = content.split("\n")
+    r.functions = _parse_functions(content, lines, patterns, lang)
+    r.classes = _parse_classes(content, lines, patterns, lang)
+    r.imports = _parse_imports(content, patterns)
+    r.exports = _parse_exports(content, patterns)
+    return r
+
+
+def _parse_functions(content, lines, patterns, lang):
+    results = []
     for pat in patterns.get("function", []):
         for m in re.finditer(pat, content, re.MULTILINE):
             name = m.group(2) if lang == "go" and m.lastindex and m.lastindex >= 2 else m.group(1)
@@ -89,21 +98,36 @@ def parse_with_regex(content: str, lang: str) -> ParseResult:
             line = content[:m.start()].count("\n") + 1
             params_str = m.group(m.lastindex) if m.lastindex and m.lastindex > 1 else ""
             params = [p.strip().split()[-1].split(":")[-1] for p in (params_str or "").split(",") if p.strip()] if params_str else []
-            r.functions.append({"name": name, "line_start": line, "line_end": _find_block_end(lines, line-1, lang), "params": params, "decorators": []})
+            results.append({"name": name, "line_start": line, "line_end": _find_block_end(lines, line-1, lang), "params": params, "decorators": []})
+    return results
+
+
+def _parse_classes(content, lines, patterns, lang):
+    results = []
     for pat in patterns.get("class", []):
         for m in re.finditer(pat, content, re.MULTILINE):
             line = content[:m.start()].count("\n") + 1
             bases = [b.strip() for b in m.group(2).split(",") if b.strip()] if m.lastindex and m.lastindex >= 2 and m.group(2) else []
-            r.classes.append({"name": m.group(1), "line_start": line, "line_end": _find_block_end(lines, line-1, lang), "methods": [], "bases": bases, "decorators": []})
+            results.append({"name": m.group(1), "line_start": line, "line_end": _find_block_end(lines, line-1, lang), "methods": [], "bases": bases, "decorators": []})
+    return results
+
+
+def _parse_imports(content, patterns):
+    results = []
     for pat in patterns.get("import", []):
         for m in re.finditer(pat, content, re.MULTILINE):
             groups = [g for g in m.groups() if g]
             source = groups[-1] if groups else ""
             specs = [s.strip() for s in groups[0].split(",") if s.strip()] if len(groups) > 1 else []
-            r.imports.append({"source": source, "specifiers": specs, "line": content[:m.start()].count("\n") + 1})
+            results.append({"source": source, "specifiers": specs, "line": content[:m.start()].count("\n") + 1})
+    return results
+
+
+def _parse_exports(content, patterns):
+    results = []
     for pat in patterns.get("export", []):
         for m in re.finditer(pat, content, re.MULTILINE):
             for n in m.group(1).split(","):
                 n = n.strip().split(" as ")[0].strip()
-                if n: r.exports.append({"name": n, "line": content[:m.start()].count("\n") + 1})
-    return r
+                if n: results.append({"name": n, "line": content[:m.start()].count("\n") + 1})
+    return results
