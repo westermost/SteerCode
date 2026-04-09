@@ -354,11 +354,11 @@ Compatible with any OpenAI-compatible API: LM Studio, Ollama, LocalAI, vLLM, tex
 
 | Project | Language | Nodes | Edges | Layers | Chunks | Max Chunk | Versions |
 |---|---|---|---|---|---|---|---|
-| SteerCode | Python/JS | 184 | 218 | 4 | 3 | 2.4K tok | — |
-| homes-pc | PHP/JS | 56,942 | 88,410 | 7 | 81 | 173K tok | PHP 5.6, Symfony 2.0.4 |
-| homes-sp | PHP/JS | 12,614 | 18,389 | 7 | 7 | 180K tok | PHP 7.2, Symfony 3.4.6 |
-| API-Server | Ruby | 50,468 | 62,111 | 7 | 76 | 151K tok | Ruby 2.5.9, Sinatra 2.0.0 |
-| v4-bunjou | PHP/JS | 9,312 | 14,687 | 6 | 9 | 35K tok | Legacy (no composer) |
+| SteerCode | Python/JS | 217 | 271 | 5 | 3 | 2.4K tok | — |
+| Project A | PHP/JS | 56,942 | 88,410 | 7 | 81 | 173K tok | PHP 5.6, Symfony 2.0.4 |
+| Project B | PHP/JS | 12,614 | 18,389 | 7 | 7 | 180K tok | PHP 7.2, Symfony 3.4.6 |
+| Project C | Ruby | 50,468 | 62,111 | 7 | 76 | 151K tok | Ruby 2.5.9, Sinatra 2.0.0 |
+| Project D | PHP/JS | 9,312 | 14,687 | 6 | 9 | 35K tok | Legacy (no composer) |
 
 All projects: max chunk < 200K tokens, fits 1M context window.
 
