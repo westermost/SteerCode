@@ -6,13 +6,16 @@ from pathlib import Path
 from collections import defaultdict
 from typing import List, Dict, Tuple, Optional
 from .ui import C, progress_bar_eta, ETATracker
+from . import config as cfg
 
 DEFAULT_LLM_URL = "http://localhost:1234/v1/chat/completions"
 
 # ─── HTTP ────────────────────────────────────────────────────────────────────
 
 def _llm_request(url: str, model: str, prompt: str,
-                 timeout: int = 300, max_retries: int = 3) -> str:
+                 timeout: int = None, max_retries: int = None) -> str:
+    timeout = timeout or cfg.get("llm", "timeout")
+    max_retries = max_retries or cfg.get("llm", "max_retries")
     if not url.endswith("/chat/completions"):
         url = url.rstrip("/")
         if url.endswith("/v1/completions"):
@@ -89,18 +92,20 @@ def _save_cache(cache_dir: Optional[Path], bid: str, result: dict):
 
 # ─── Context Selection ───────────────────────────────────────────────────────
 
-TOP_K_CALLERS = 2
-TOP_K_CALLEES = 3
+TOP_K_CALLERS = None  # loaded from config
+TOP_K_CALLEES = None
 
 def _select_context(node: dict, edges: List[dict], node_by_id: Dict[str, dict],
                     importance: Dict[str, float]) -> str:
+    top_callers = cfg.get("llm", "top_k_callers")
+    top_callees = cfg.get("llm", "top_k_callees")
     """Build context string for a node: callers + callees sorted by importance."""
     nid = node["id"]
     callers = [e["source"] for e in edges if e["target"] == nid and e["type"] == "calls"]
     callees = [e["target"] for e in edges if e["source"] == nid and e["type"] == "calls"]
 
-    callers = sorted(callers, key=lambda x: importance.get(x, 0), reverse=True)[:TOP_K_CALLERS]
-    callees = sorted(callees, key=lambda x: importance.get(x, 0), reverse=True)[:TOP_K_CALLEES]
+    callers = sorted(callers, key=lambda x: importance.get(x, 0), reverse=True)[:top_callers]
+    callees = sorted(callees, key=lambda x: importance.get(x, 0), reverse=True)[:top_callees]
 
     parts = []
     if callers:
@@ -174,7 +179,7 @@ def _build_batch_prompt(batch_nodes: List[dict], file_contents: Dict[str, list],
             continue
         s, e = max(0, n["line_range"][0] - 2), min(len(lines), n["line_range"][1] + 1)
         snippet = "\n".join(lines[s:e])
-        if len(snippet) > 3000: snippet = snippet[:3000] + "\n..."
+        if len(snippet) > cfg.get("llm", "snippet_max_chars"): snippet = snippet[:cfg.get("llm", "snippet_max_chars")] + "\n..."
         if total_chars + len(snippet) > max_code_chars and blocks:
             overflow_started = True
             remaining_nodes.append(n)
@@ -226,7 +231,7 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
                     llm_url: str, model: str = "",
                     context_size: int = 8192, max_enrich: int = 0,
                     output_dir: Path = None) -> int:
-    max_code_chars = min((context_size - 800) * 3, 15000)
+    max_code_chars = min((context_size - 800) * 3, cfg.get("llm", "max_code_chars"))
     cache_dir = (output_dir / "cache") if output_dir else None
 
     enrichable = [n for n in nodes if n["type"] in ("function", "class")
@@ -270,7 +275,7 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
     for fp, file_nodes in by_file.items():
         current_batch.extend(file_nodes)
         current_files += 1
-        if current_files >= 15 or len(current_batch) >= 30:
+        if current_files >= cfg.get("llm", "files_per_batch") or len(current_batch) >= cfg.get("llm", "nodes_per_batch"):
             batches.append(current_batch)
             current_batch = []
             current_files = 0
@@ -346,7 +351,7 @@ def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
         joined_bid = ",".join(bids) if bids else _batch_id(batch)
         return idx, joined_bid, combined_result, combined_missing, status, latency
 
-    max_workers = min(3, max(1, len(batches) // 2))
+    max_workers = min(cfg.get("llm", "max_workers"), max(1, len(batches) // 2))
     sys.stdout.write(f"    {C.DIM}Sending to LLM ({max_workers} workers)... waiting for first response{C.RST}")
     sys.stdout.flush()
     first_response = True
