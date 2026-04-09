@@ -48,7 +48,11 @@ LANG_MAP = {
 CODE_LANGS = {"python","javascript","typescript","java","go","rust","c","cpp",
               "csharp","ruby","php","swift","kotlin","scala","lua","shell"}
 
-MAX_FILE_SIZE = 512 * 1024
+MAX_FILE_SIZE = None  # loaded from config at runtime
+
+def _max_file_size():
+    from . import config as cfg
+    return cfg.get("scan", "max_file_size_kb") * 1024
 
 def parse_gitignore(root: Path) -> List[str]:
     gi = root / ".gitignore"
@@ -99,7 +103,7 @@ def scan_files(root: Path, on_progress=None) -> List[Path]:
                 continue
             if e.is_dir():
                 walk(e)
-            elif e.is_file() and e.stat().st_size <= MAX_FILE_SIZE:
+            elif e.is_file() and e.stat().st_size <= _max_file_size():
                 if detect_language(e):
                     files.append(e)
                     if on_progress:

@@ -119,6 +119,8 @@ def _parse_args():
 
 def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     import time
+    from src.config import load_config
+    load_config(root)
     t0 = time.time()
 
     # Auto-add output dir to .gitignore if git repo exists
@@ -139,7 +141,12 @@ def _run_pipeline(args, root, output_dir, llm_url, use_llm):
     phase += 1
     phase_header(phase, total_phases, "Scanning files")
     def _scan_progress(count, name):
-        if count % 50 == 0 or count < 5:
+        throttle = 50
+        try:
+            from src import config as cfg_mod
+            throttle = cfg_mod.get("scan", "progress_throttle")
+        except Exception: pass
+        if count % throttle == 0 or count < 5:
             sys.stdout.write(f"\r\033[K    {C.DIM}{count} files found — {name[:50]}{C.RST}")
             sys.stdout.flush()
     files = scan_files(root, on_progress=_scan_progress)

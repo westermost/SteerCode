@@ -1,0 +1,17 @@
+{
+  "llm": {
+    "timeout": 300,
+    "max_retries": 3,
+    "max_workers": 3,
+    "max_code_chars": 15000,
+    "files_per_batch": 15,
+    "nodes_per_batch": 30,
+    "snippet_max_chars": 3000,
+    "top_k_callers": 2,
+    "top_k_callees": 3
+  },
+  "scan": {
+    "max_file_size_kb": 512,
+    "progress_throttle": 50
+  }
+}
