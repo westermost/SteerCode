@@ -227,185 +227,157 @@ ENRICH_LANGS = {"python","javascript","typescript","java","go","rust","c","cpp",
                 "csharp","ruby","php","swift","kotlin","scala","lua","shell","sql"}
 SKIP_PATHS = {"test","tests","spec","specs","__tests__","e2e"}
 
-def enrich_with_llm(nodes: List[dict], edges: List[dict], root: Path,
-                    llm_url: str, model: str = "",
-                    context_size: int = 8192, max_enrich: int = 0,
-                    output_dir: Path = None) -> int:
-    max_code_chars = min((context_size - 800) * 3, cfg.get("llm", "max_code_chars"))
-    cache_dir = (output_dir / "cache") if output_dir else None
+def enrich_with_llm(nodes, edges, root, llm_url, model='',
+                    context_size=8192, max_enrich=0, output_dir=None):
+    max_code_chars = min((context_size - 800) * 3, cfg.get('llm', 'max_code_chars'))
+    cache_dir = (output_dir / 'cache') if output_dir else None
 
-    enrichable = [n for n in nodes if n["type"] in ("function", "class")
-                  and n.get("file_path") and n.get("language", "") in ENRICH_LANGS
-                  and not (SKIP_PATHS & set(n["file_path"].lower().split("/")))]
+    enrichable = _filter_enrichable(nodes)
     if not enrichable: return 0
+    _log_skipped(nodes)
+    enrichable = _sort_by_priority(enrichable, max_enrich)
+    file_contents = _load_file_contents(enrichable, root)
+    batches = _build_batches(enrichable)
+    node_by_id = {n['id']: n for n in nodes}
+    importance = _compute_and_store_importance(nodes, edges, node_by_id, len(batches))
+    enriched, metrics = _run_concurrent(batches, file_contents, max_code_chars, edges,
+                                        node_by_id, importance, llm_url, model, cache_dir)
+    del file_contents
+    if output_dir and metrics:
+        try:
+            (output_dir / 'metrics.json').write_text(json.dumps({
+                'total_batches': len(batches), 'enriched': enriched,
+                'batches': metrics}, indent=2))
+        except Exception: pass
+    return enriched
 
-    skipped_fe = sum(1 for n in nodes if n["type"] in ("function", "class")
-                     and n.get("language", "") in {"css","html","markdown","json","yaml","toml","xml","dockerfile","terraform","makefile"})
-    skipped_test = sum(1 for n in nodes if n["type"] in ("function", "class")
-                       and n.get("file_path") and (SKIP_PATHS & set(n["file_path"].lower().split("/"))))
+
+def _filter_enrichable(nodes):
+    return [n for n in nodes if n['type'] in ('function', 'class')
+            and n.get('file_path') and n.get('language', '') in ENRICH_LANGS
+            and not (SKIP_PATHS & set(n['file_path'].lower().split('/')))]
+
+
+def _log_skipped(nodes):
+    skipped_fe = sum(1 for n in nodes if n['type'] in ('function', 'class')
+                     and n.get('language', '') in {'css','html','markdown','json','yaml','toml','xml','dockerfile','terraform','makefile'})
+    skipped_test = sum(1 for n in nodes if n['type'] in ('function', 'class')
+                       and n.get('file_path') and (SKIP_PATHS & set(n['file_path'].lower().split('/'))))
     if skipped_fe or skipped_test:
         sys.stdout.write(f"\n    {C.DIM}Skipping {skipped_fe} config/frontend + {skipped_test} test nodes{C.RST}\n")
 
-    # Sort by complexity (complex first)
-    comp_score = {"complex": 3, "moderate": 2, "simple": 1}
-    type_score = {"class": 2, "function": 1}
-    enrichable.sort(key=lambda n: (comp_score.get(n.get("complexity"), 0), type_score.get(n["type"], 0)), reverse=True)
 
+def _sort_by_priority(enrichable, max_enrich):
+    comp = {'complex': 3, 'moderate': 2, 'simple': 1}
+    tp = {'class': 2, 'function': 1}
+    enrichable.sort(key=lambda n: (comp.get(n.get('complexity'), 0), tp.get(n['type'], 0)), reverse=True)
     if max_enrich > 0: enrichable = enrichable[:max_enrich]
     sys.stdout.write(f"    {C.DIM}Enriching {len(enrichable)} backend nodes{C.RST}\n")
+    return enrichable
 
-    # Read file contents once
-    sys.stdout.write(f"    {C.DIM}Reading file contents...{C.RST}")
+
+def _load_file_contents(enrichable, root):
+    sys.stdout.write(f'    {C.DIM}Reading file contents...{C.RST}')
     sys.stdout.flush()
-    file_contents: Dict[str, list] = {}
+    fc = {}
     for n in enrichable:
-        fp = n["file_path"]
-        if fp not in file_contents:
-            try: file_contents[fp] = (root / fp).read_text(errors="ignore").splitlines()
-            except Exception: file_contents[fp] = None
-    sys.stdout.write(f"\r\033[K    {C.DIM}{len(file_contents)} files loaded{C.RST}\n")
+        fp = n['file_path']
+        if fp not in fc:
+            try: fc[fp] = (root / fp).read_text(errors='ignore').splitlines()
+            except Exception: fc[fp] = None
+    sys.stdout.write(f"\r\033[K    {C.DIM}{len(fc)} files loaded{C.RST}\n")
+    return fc
 
-    # Batch by file (10-20 files per batch)
+
+def _build_batches(enrichable):
     by_file = defaultdict(list)
-    for n in enrichable: by_file[n["file_path"]].append(n)
+    for n in enrichable: by_file[n['file_path']].append(n)
+    batches, batch, files = [], [], 0
+    fpb, npb = cfg.get('llm', 'files_per_batch'), cfg.get('llm', 'nodes_per_batch')
+    for fp, nodes in by_file.items():
+        batch.extend(nodes); files += 1
+        if files >= fpb or len(batch) >= npb:
+            batches.append(batch); batch = []; files = 0
+    if batch: batches.append(batch)
+    return batches
 
-    batches: List[List[dict]] = []
-    current_batch = []
-    current_files = 0
-    for fp, file_nodes in by_file.items():
-        current_batch.extend(file_nodes)
-        current_files += 1
-        if current_files >= cfg.get("llm", "files_per_batch") or len(current_batch) >= cfg.get("llm", "nodes_per_batch"):
-            batches.append(current_batch)
-            current_batch = []
-            current_files = 0
-    if current_batch: batches.append(current_batch)
 
-    # Node lookup for applying results
-    node_by_id = {n["id"]: n for n in nodes}
-
-    # Compute importance for context selection
-    sys.stdout.write(f"    {C.DIM}Computing importance scores...{C.RST}")
+def _compute_and_store_importance(nodes, edges, node_by_id, num_batches):
+    sys.stdout.write(f'    {C.DIM}Computing importance scores...{C.RST}')
     sys.stdout.flush()
     from .graph import compute_importance
     importance = compute_importance(nodes, edges)
-    sys.stdout.write(f"\r\033[K    {C.DIM}{len(importance)} nodes scored, {len(batches)} batches ready{C.RST}\n")
+    sys.stdout.write(f"\r\033[K    {C.DIM}{len(importance)} nodes scored, {num_batches} batches ready{C.RST}\n")
     for nid, score in importance.items():
         if nid in node_by_id:
-            sem = node_by_id[nid].get("semantics")
-            if sem: sem["importance"] = score
+            sem = node_by_id[nid].get('semantics')
+            if sem: sem['importance'] = score
+    return importance
 
-    # Process batches (concurrent)
-    enriched = 0
-    consecutive_errors = 0
+
+def _run_concurrent(batches, file_contents, max_code_chars, edges,
+                    node_by_id, importance, llm_url, model, cache_dir):
+    enriched, consecutive_errors = 0, 0
     eta = ETATracker(len(batches))
-    metrics = []
-    lock = threading.Lock()
-    stop_flag = threading.Event()
+    metrics, lock, stop_flag = [], threading.Lock(), threading.Event()
 
     def _process_one(idx_batch):
         idx, batch = idx_batch
-        pending = list(batch)
-        combined_result = {}
-        combined_missing = set()
-        latency = 0.0
-        status = "success"
-        bids = []
-
+        pending, combined_result, combined_missing = list(batch), {}, set()
+        latency, status, bids = 0.0, 'success', []
         while pending:
-            prompt, expected_ids, id_map, included_nodes, remaining_nodes, content_tokens = _build_batch_prompt(
-                pending, file_contents, max_code_chars, edges, node_by_id, importance
-            )
-            if not included_nodes:
-                break
-
-            bid = _batch_id(included_nodes, content_tokens)
-            bids.append(bid)
+            prompt, expected_ids, id_map, included, remaining, tokens = _build_batch_prompt(
+                pending, file_contents, max_code_chars, edges, node_by_id, importance)
+            if not included: break
+            bid = _batch_id(included, tokens); bids.append(bid)
             cached = _get_cached(cache_dir, bid)
-            if cached:
-                combined_result.update(cached)
-                pending = remaining_nodes
-                continue
-
+            if cached: combined_result.update(cached); pending = remaining; continue
             t0 = time.time()
             raw = _llm_request(llm_url, model, prompt)
             result = _extract_json(raw)
             result = _validate_and_retry(result, expected_ids, llm_url, model, prompt)
             latency += time.time() - t0
-
-            cache_result = {}
+            cr = {}
             if result:
-                for fid, summary in result.items():
+                for fid, s in result.items():
                     nid = id_map.get(fid)
-                    if nid and isinstance(summary, str):
-                        cache_result[nid] = summary
-                _save_cache(cache_dir, bid, cache_result)
-
-            combined_result.update(cache_result)
+                    if nid and isinstance(s, str): cr[nid] = s
+                _save_cache(cache_dir, bid, cr)
+            combined_result.update(cr)
             missing = set(expected_ids) - set(result.keys()) if result else set(expected_ids)
-            if missing:
-                combined_missing.update(missing)
-                status = "partial"
-            pending = remaining_nodes
+            if missing: combined_missing.update(missing); status = 'partial'
+            pending = remaining
+        return idx, ','.join(bids) if bids else _batch_id(batch), combined_result, combined_missing, status, latency
 
-        joined_bid = ",".join(bids) if bids else _batch_id(batch)
-        return idx, joined_bid, combined_result, combined_missing, status, latency
-
-    max_workers = min(cfg.get("llm", "max_workers"), max(1, len(batches) // 2))
-    sys.stdout.write(f"    {C.DIM}Sending to LLM ({max_workers} workers)... waiting for first response{C.RST}")
+    max_workers = min(cfg.get('llm', 'max_workers'), max(1, len(batches) // 2))
+    sys.stdout.write(f'    {C.DIM}Sending to LLM ({max_workers} workers)... waiting for first response{C.RST}')
     sys.stdout.flush()
-    first_response = True
-
+    first = True
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {pool.submit(_process_one, (i, b)): i for i, b in enumerate(batches)}
-
         for future in as_completed(futures):
-            if first_response:
-                sys.stdout.write("\r\033[K")
-                first_response = False
-            done_count = sum(1 for f in futures if f.done())
+            if first: sys.stdout.write("\r\033[K"); first = False
+            done = sum(1 for f in futures if f.done())
             try:
                 idx, bid, result_map, missing, status, latency = future.result(timeout=600)
                 with lock:
-                    for nid, summary in result_map.items():
-                        if nid in node_by_id:
-                            node_by_id[nid]["summary"] = summary
-                            enriched += 1
+                    for nid, s in result_map.items():
+                        if nid in node_by_id: node_by_id[nid]['summary'] = s; enriched += 1
                     eta.tick()
-                    progress_bar_eta(done_count, len(batches), eta, f"batch {done_count}/{len(batches)}")
-                    metrics.append({"batch_id": bid, "status": status, "size": len(batches[idx]),
-                                   "latency": round(latency, 1)})
+                    progress_bar_eta(done, len(batches), eta, f'batch {done}/{len(batches)}')
+                    metrics.append({'batch_id': bid, 'status': status, 'size': len(batches[idx]), 'latency': round(latency, 1)})
                     consecutive_errors = 0
-
             except urllib.error.HTTPError as e:
-                err_type = classify_error(e)
                 with lock:
                     consecutive_errors += 1
-                    metrics.append({"batch_id": "", "status": "failed", "error": err_type})
-                    progress_bar_eta(done_count, len(batches), eta, f"⚠ error")
-                    if err_type == "auth" or consecutive_errors >= 5:
-                        stop_flag.set()
-                        break
-
+                    metrics.append({'batch_id': '', 'status': 'failed', 'error': classify_error(e)})
+                    if classify_error(e) == 'auth' or consecutive_errors >= 5: stop_flag.set(); break
             except Exception as e:
                 with lock:
                     consecutive_errors += 1
-                    metrics.append({"batch_id": "", "status": "failed", "error": str(e)[:100]})
-                    if consecutive_errors >= 5:
-                        stop_flag.set()
-                        break
-
-    del file_contents
-
-    # Save metrics
-    if output_dir and metrics:
-        try:
-            (output_dir / "metrics.json").write_text(json.dumps({
-                "total_batches": len(batches), "enriched": enriched,
-                "batches": metrics}, indent=2))
-        except Exception: pass
-
-    return enriched
+                    metrics.append({'batch_id': '', 'status': 'failed', 'error': str(e)[:100]})
+                    if consecutive_errors >= 5: stop_flag.set(); break
+    return enriched, metrics
 
 
 # ─── Multi-Level Enrichment (v0.3) ──────────────────────────────────────────
